@@ -83,7 +83,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
 
     vscode.commands.registerCommand("bluetoken.openGithub", async () => {
-      const url = isPlaceholderUrl(LINKS.github) ? LINKS.repository : LINKS.github;
+      const url = isPlaceholderUrl(LINKS.repository) ? LINKS.github : LINKS.repository;
       if (isPlaceholderUrl(url)) {
         vscode.window.showWarningMessage(
           "BlueToken: Set your GitHub URL in src/links.ts (and package.json), then rebuild."

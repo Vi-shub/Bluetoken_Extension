@@ -1,14 +1,11 @@
 /**
  * Public links shown in the panel, status bar, and Marketplace metadata.
- *
- * Project site is set. When you create the GitHub repo, update `github` +
- * `repository` below and the matching fields in package.json.
  */
 export const LINKS = {
-  /** Author / profile (GitHub). Update when the public repo exists. */
-  github: "https://github.com/YOUR_GITHUB_USERNAME",
-  /** This extension's repository. Update to match your public GitHub repo. */
-  repository: "https://github.com/YOUR_GITHUB_USERNAME/bluetoken",
+  /** Author / profile (GitHub). */
+  github: "https://github.com/Vi-shub",
+  /** This extension's repository — used for Star on GitHub. */
+  repository: "https://github.com/Vi-shub/Bluetoken_Extension",
   /** Author / project site */
   project: "https://www.shubhamvishwakarma.com",
   papers: [

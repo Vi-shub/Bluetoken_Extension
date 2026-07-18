@@ -6,7 +6,7 @@ Every AI response heats data-center servers. Cooling them uses real freshwater. 
 
 **Open source · MIT · 100% local.** Chat data never leaves your machine.
 
-**Author:** [Shubham Vishwakarma](https://www.shubhamvishwakarma.com)
+**Author:** [Shubham Vishwakarma](https://www.shubhamvishwakarma.com) · [★ Star on GitHub](https://github.com/Vi-shub/Bluetoken_Extension)
 
 ---
 

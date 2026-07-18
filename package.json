@@ -12,10 +12,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_GITHUB_USERNAME/bluetoken"
+    "url": "https://github.com/Vi-shub/Bluetoken_Extension"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_GITHUB_USERNAME/bluetoken/issues"
+    "url": "https://github.com/Vi-shub/Bluetoken_Extension/issues"
   },
   "homepage": "https://www.shubhamvishwakarma.com",
   "engines": {
@@ -86,7 +86,7 @@
       },
       {
         "command": "bluetoken.openGithub",
-        "title": "BlueToken: Open GitHub"
+        "title": "BlueToken: Star on GitHub"
       },
       {
         "command": "bluetoken.openProject",

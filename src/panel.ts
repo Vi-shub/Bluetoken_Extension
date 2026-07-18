@@ -354,9 +354,9 @@ ${
   <div class="section-label">About & research</div>
   <div class="row"><a href="#" onclick="post('openResearch');return false;">Research papers (AI water footprint)</a></div>
   ${
-    isPlaceholderUrl(LINKS.github)
+    isPlaceholderUrl(LINKS.repository)
       ? `<div class="row">GitHub: set URL in src/links.ts</div>`
-      : `<div class="row"><a href="#" onclick="post('openGithub');return false;">GitHub</a></div>`
+      : `<div class="row"><a href="#" onclick="post('openGithub');return false;">★ Star on GitHub</a></div>`
   }
   <div class="row"><a href="#" onclick="post('openProject');return false;">Author site · shubhamvishwakarma.com</a></div>
   <div class="row" style="margin-top:6px;opacity:0.85">

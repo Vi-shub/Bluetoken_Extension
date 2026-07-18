@@ -61,7 +61,7 @@ export class BlueTokenStatusBar {
       `[Track now](command:bluetoken.trackText) | [Open Panel](command:bluetoken.showPanel) | [Reset](command:bluetoken.resetSession)\n\n`
     );
     md.appendMarkdown(
-      `[Research](command:bluetoken.openResearch) | [GitHub](command:bluetoken.openGithub) | [Project](command:bluetoken.openProject)`
+      `[Research](command:bluetoken.openResearch) | [★ Star on GitHub](command:bluetoken.openGithub) | [Project](command:bluetoken.openProject)`
     );
     return md;
   }
