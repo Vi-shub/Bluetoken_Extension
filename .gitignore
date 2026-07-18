@@ -1,0 +1,16 @@
+# Build
+out/
+node_modules/
+.vscode-test/
+*.tsbuildinfo
+
+# Packaged extensions (keep under releases/ locally; upload via GitHub Releases)
+*.vsix
+releases/**/*.vsix
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*

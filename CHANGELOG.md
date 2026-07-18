@@ -1,0 +1,40 @@
+# Changelog
+
+All notable changes to the BlueToken extension are documented here.
+
+## [0.1.4] - 2026-07-16
+
+### Improved
+- **Efficiency**: skip Cursor/Antigravity DB spawns and Copilot file parses when disk fingerprints are unchanged; overlap guards; staggered polls; no auto-diagnose on every activate.
+- **Robustness**: de-dupe Copilot session files (Windows case aliases + chatSessions vs transcripts) so one chat is not triple-counted.
+- **Copy**: removed long em-dashes from display name, Marketplace description, and toasts.
+- **Links**: research papers in panel/status bar; author site [shubhamvishwakarma.com](https://www.shubhamvishwakarma.com).
+- **Repo layout**: `docs/`, `releases/<version>/`, `media/`, `.github/` templates; `npm run package` writes versioned VSIX.
+
+## [0.1.2] - 2026-07-15
+
+### Fixed / improved
+- **Diagnostics**: `BlueToken: Diagnose` + Output channel `BlueToken` for debugging other machines.
+- Hardened Cursor / Antigravity / Copilot path discovery; readers always start and retry.
+- Copilot scans VS Code + Cursor + Insiders user folders; clearer errors when `node:sqlite` spawn fails.
+- Expanded model rate list (GPT-5, Claude 4, Gemini 2.5, Composer, DeepSeek, Grok, Qwen, …).
+
+## [0.1.1] — 2026-07-14
+
+### Fixed
+- Antigravity entries now use **real step timestamps** from the DB (not poll/wake time).
+- Copilot reader looks at modern `emptyWindowChatSessions/*.jsonl` with exact `outputTokens`.
+- Antigravity default count mode `outputOnly` (ignore huge context dumps).
+- Lifetime history no longer dumped into the live session as one giant message.
+
+### Docs
+- Privacy policy, contributing guide, publish checklist for open source + Marketplace.
+
+## [0.1.0] — 2026-07-10
+
+### Added
+- Exact Cursor tracking from `state.vscdb`.
+- Exact Antigravity tracking from Protobuf `gen_metadata`.
+- Copilot / file-watcher / `Ctrl+Alt+W` fallbacks.
+- Status bar + side panel; session + all-time persistence.
+- Per-model water rates; Scope 1 / Scope 1+2.

@@ -1,0 +1,256 @@
+{
+  "name": "bluetoken",
+  "displayName": "BlueToken: AI Water Footprint",
+  "description": "See the freshwater consumed by data centers to power your AI assistant. Works with Cursor, Copilot, and any AI tool. Track any response with one shortcut.",
+  "version": "0.1.4",
+  "publisher": "bluetoken",
+  "license": "MIT",
+  "icon": "resources/icon.png",
+  "galleryBanner": {
+    "color": "#0a1730",
+    "theme": "dark"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_GITHUB_USERNAME/bluetoken"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_GITHUB_USERNAME/bluetoken/issues"
+  },
+  "homepage": "https://www.shubhamvishwakarma.com",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "water",
+    "environment",
+    "sustainability",
+    "AI",
+    "carbon",
+    "copilot",
+    "cursor",
+    "tokens",
+    "green"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "bluetoken.showPanel",
+        "title": "BlueToken: Show Water Usage Panel",
+        "icon": "$(drop)"
+      },
+      {
+        "command": "bluetoken.resetSession",
+        "title": "BlueToken: Reset Session Counter"
+      },
+      {
+        "command": "bluetoken.resetAllTime",
+        "title": "BlueToken: Reset All-Time Totals"
+      },
+      {
+        "command": "bluetoken.logTokens",
+        "title": "BlueToken: Log Token Usage"
+      },
+      {
+        "command": "bluetoken.trackText",
+        "title": "BlueToken: Track AI Response (selection or clipboard)"
+      },
+      {
+        "command": "bluetoken.setModel",
+        "title": "BlueToken: Set Model"
+      },
+      {
+        "command": "bluetoken.refresh",
+        "title": "BlueToken: Refresh Usage From Editor Data",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "bluetoken.showLogs",
+        "title": "BlueToken: Show Logs"
+      },
+      {
+        "command": "bluetoken.diagnose",
+        "title": "BlueToken: Diagnose (for bugs on other machines)"
+      },
+      {
+        "command": "bluetoken.openResearch",
+        "title": "BlueToken: Open Research Papers"
+      },
+      {
+        "command": "bluetoken.openGithub",
+        "title": "BlueToken: Open GitHub"
+      },
+      {
+        "command": "bluetoken.openProject",
+        "title": "BlueToken: Open Project Page"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "bluetoken.trackText",
+        "key": "ctrl+alt+w",
+        "mac": "cmd+alt+w"
+      }
+    ],
+    "chatParticipants": [
+      {
+        "id": "bluetoken.assistant",
+        "name": "bluetoken",
+        "description": "Ask any question. BlueToken forwards it to the AI and tracks freshwater usage.",
+        "isSticky": false
+      }
+    ],
+    "configuration": {
+      "title": "BlueToken",
+      "properties": {
+        "bluetoken.scope": {
+          "type": "string",
+          "enum": [
+            "scope1",
+            "scope1and2"
+          ],
+          "enumDescriptions": [
+            "Scope 1 only: on-site data center cooling water (what companies officially report)",
+            "Scope 1+2: comprehensive; adds indirect water from electricity generation (recommended)"
+          ],
+          "default": "scope1and2",
+          "description": "Which water scope to measure. Scope 1+2 is the honest full-cost figure."
+        },
+        "bluetoken.units": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "ml",
+            "drops",
+            "teaspoons"
+          ],
+          "default": "auto",
+          "description": "Display unit for water amounts. 'auto' picks the most readable unit based on quantity."
+        },
+        "bluetoken.showInStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show water usage in the VSCode status bar."
+        },
+        "bluetoken.modelRateOverrides": {
+          "type": "object",
+          "default": {},
+          "description": "Override water rates (mL per token) for specific models. E.g.: { \"gpt-4o\": 0.005 }"
+        },
+        "bluetoken.showComparison": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show real-world water comparisons (e.g. 'equals N drops') alongside mL values."
+        },
+        "bluetoken.trackCursorChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically track EXACT token usage from Cursor's chat by reading Cursor's local database (read-only). No data leaves your machine."
+        },
+        "bluetoken.trackCopilotChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically track GitHub Copilot chat by reading the editor's saved chat sessions and estimating tokens from the text."
+        },
+        "bluetoken.trackAntigravityChat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically track EXACT token usage from Antigravity by decoding Protobuf gen_metadata in ~/.gemini/antigravity-ide/conversations/*.db (read-only)."
+        },
+        "bluetoken.antigravityCountMode": {
+          "type": "string",
+          "enum": [
+            "outputOnly",
+            "incremental",
+            "fullApi"
+          ],
+          "enumDescriptions": [
+            "Recommended: only count generated (output) tokens; matches what the model wrote, not the whole prompt/context",
+            "Output tokens + only NEW context growth (includes file/tool dumps into context)",
+            "Sum full context size on every step (raw API billing; numbers look much higher)"
+          ],
+          "default": "outputOnly",
+          "description": "How Antigravity token totals are computed from gen_metadata."
+        },
+        "bluetoken.copilotCountMode": {
+          "type": "string",
+          "enum": [
+            "outputOnly",
+            "incremental",
+            "fullApi"
+          ],
+          "enumDescriptions": [
+            "Recommended: only count Copilot outputTokens from chat metadata",
+            "Output + new promptTokens growth between turns",
+            "Sum full promptTokens + outputTokens every turn (very high)"
+          ],
+          "default": "outputOnly",
+          "description": "How Copilot chat token totals are computed from local session files."
+        },
+        "bluetoken.pollIntervalSeconds": {
+          "type": "number",
+          "default": 20,
+          "minimum": 10,
+          "description": "How often (in seconds) BlueToken reads the editor's chat databases to update usage."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "bluetoken-sidebar",
+          "title": "BlueToken Water Usage",
+          "icon": "resources/icon-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "bluetoken-sidebar": [
+        {
+          "type": "webview",
+          "id": "bluetoken.panel",
+          "name": "Water Usage"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "bluetoken.refresh",
+          "when": "view == bluetoken.panel",
+          "group": "navigation@1"
+        },
+        {
+          "command": "bluetoken.resetSession",
+          "when": "view == bluetoken.panel",
+          "group": "navigation@2"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts",
+    "package": "node scripts/package-vsix.mjs",
+    "vscode:package": "npm run package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/vsce": "^3.9.2",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0"
+  }
+}
