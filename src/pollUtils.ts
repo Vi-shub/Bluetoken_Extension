@@ -26,7 +26,21 @@ export function fingerprintFile(filePath: string): string | null {
   }
 }
 
-/** Fingerprint all *.db files in a directory (sorted). */
+/**
+ * Fingerprint a SQLite DB including -wal / -shm.
+ * Cursor/Antigravity often write to the WAL first; the main .vscdb/.db
+ * mtime can stay unchanged for a long time — skipping on main-file-only
+ * fingerprints misses live chat until a checkpoint (or a manual refresh).
+ */
+export function fingerprintSqlite(dbPath: string): string | null {
+  const parts = [fingerprintFile(dbPath), fingerprintFile(`${dbPath}-wal`), fingerprintFile(`${dbPath}-shm`)];
+  if (parts.every((p) => p === null)) {
+    return null;
+  }
+  return parts.map((p) => p ?? "-").join("|");
+}
+
+/** Fingerprint all *.db files in a directory (sorted), including WAL/SHM. */
 export function fingerprintDbDir(dir: string): string | null {
   try {
     if (!fs.existsSync(dir)) {
@@ -42,8 +56,8 @@ export function fingerprintDbDir(dir: string): string | null {
     }
     return dbs
       .map((f) => {
-        const st = fs.statSync(path.join(dir, f));
-        return `${f}:${st.mtimeMs}:${st.size}`;
+        const full = path.join(dir, f);
+        return `${f}:${fingerprintSqlite(full) ?? "?"}`;
       })
       .join("|");
   } catch {

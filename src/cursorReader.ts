@@ -6,7 +6,8 @@ import { runCursorReader } from "./dbRunner";
 import { SessionTracker } from "./sessionTracker";
 import { calculateWater, getScopeConfig, getModelOverrides } from "./waterCalculator";
 import { log } from "./log";
-import { fingerprintFile } from "./pollUtils";
+import { fingerprintSqlite } from "./pollUtils";
+import { suppressFileEditsFor } from "./editSuppress";
 
 const LAST_TOKENS_KEY = "bluetoken.cursor.lastTotalTokens.v2";
 const IMPORTED_KEY = "bluetoken.cursor.historyImported.v2";
@@ -14,11 +15,14 @@ const CURSOR_MODEL_ID = "cursor-chat";
 
 export class CursorUsageReader {
   private timer: NodeJS.Timeout | undefined;
+  private debounce: NodeJS.Timeout | undefined;
+  private watcher: fs.FSWatcher | undefined;
   private readonly scriptPath: string;
   private disposed = false;
   private busy = false;
   private consecutiveFailures = 0;
   private lastDbFingerprint: string | undefined;
+  private pendingAnnounce = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -66,29 +70,79 @@ export class CursorUsageReader {
     return CursorUsageReader.locateDb() !== null;
   }
 
-  start(intervalMs = 5000): void {
-    log.info(`Cursor reader start available=${this.isAvailable()} intervalMs=${intervalMs}`);
-    // Always poll — DB may appear later after Cursor creates storage.
-    setTimeout(() => void this.poll(false), 500);
-    this.timer = setInterval(() => void this.poll(false), intervalMs);
+  start(intervalMs = 3000): void {
+    // Allow slow intervals when this reader is a secondary (trackOtherIdes).
+    const ms = Math.max(2000, Math.min(intervalMs, 60_000));
+    log.info(`Cursor reader start available=${this.isAvailable()} intervalMs=${ms}`);
+    setTimeout(() => void this.poll(false), 300);
+    this.timer = setInterval(() => void this.poll(false), ms);
+    this.startFsWatch();
   }
 
   async refreshNow(): Promise<{ delta: number; total: number } | null> {
     return this.poll(true);
   }
 
+  /** Watch state.vscdb + WAL so updates land in ~300ms without waiting for the interval. */
+  private startFsWatch(): void {
+    const dbPath = CursorUsageReader.locateDb();
+    if (!dbPath) {
+      return;
+    }
+    const dir = path.dirname(dbPath);
+    const base = path.basename(dbPath);
+    try {
+      this.watcher = fs.watch(dir, (_event, filename) => {
+        if (this.disposed) {
+          return;
+        }
+        const name = filename?.toString() ?? "";
+        if (
+          !name ||
+          name === base ||
+          name === `${base}-wal` ||
+          name === `${base}-shm` ||
+          name.startsWith(base)
+        ) {
+          this.schedulePoll();
+        }
+      });
+      log.debug(`Cursor fs.watch on ${dir}`);
+    } catch (e) {
+      log.warn(`Cursor fs.watch failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private schedulePoll(): void {
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+    }
+    this.debounce = setTimeout(() => {
+      this.debounce = undefined;
+      void this.poll(false);
+    }, 250);
+  }
+
   private async poll(announce: boolean): Promise<{ delta: number; total: number } | null> {
     if (this.disposed) {
       return null;
     }
-    if (this.busy && !announce) {
+    if (announce) {
+      this.pendingAnnounce = true;
+    }
+    if (this.busy) {
+      // A live update arrived while we were reading — run again after.
+      if (!announce) {
+        this.schedulePoll();
+      }
       return null;
     }
 
     const dbPath = CursorUsageReader.locateDb();
     if (!dbPath) {
       log.warn(`Cursor DB not found. Tried: ${CursorUsageReader.listCandidateDbs().join(" | ")}`);
-      if (announce) {
+      if (this.pendingAnnounce) {
+        this.pendingAnnounce = false;
         vscode.window.showWarningMessage("BlueToken: Cursor state.vscdb not found on this machine.");
       }
       return null;
@@ -96,21 +150,27 @@ export class CursorUsageReader {
 
     if (!fs.existsSync(this.scriptPath)) {
       log.error(`Cursor reader script missing: ${this.scriptPath}`);
+      if (this.pendingAnnounce) {
+        this.pendingAnnounce = false;
+        vscode.window.showWarningMessage("BlueToken: Cursor reader script missing. Reinstall the extension.");
+      }
       return null;
     }
 
-    const fp = fingerprintFile(dbPath);
-    if (!announce && fp && fp === this.lastDbFingerprint) {
+    const fp = fingerprintSqlite(dbPath);
+    const wantAnnounce = this.pendingAnnounce;
+    if (!wantAnnounce && fp && fp === this.lastDbFingerprint) {
       return null;
     }
 
     this.busy = true;
+    this.pendingAnnounce = false;
     try {
       const result = await runCursorReader(this.scriptPath, dbPath, 45000);
       if (!result.ok || result.inputTokens === undefined) {
         this.consecutiveFailures++;
         log.error(`Cursor poll failed (#${this.consecutiveFailures}): ${result.error}`);
-        if (announce || this.consecutiveFailures === 1 || this.consecutiveFailures === 5) {
+        if (wantAnnounce || this.consecutiveFailures === 1 || this.consecutiveFailures === 5) {
           vscode.window.showWarningMessage(
             `BlueToken: Cursor chat reader failed (${result.error ?? "unknown"}). See Output → BlueToken.`
           );
@@ -118,9 +178,8 @@ export class CursorUsageReader {
         return null;
       }
       this.consecutiveFailures = 0;
-      if (fp) {
-        this.lastDbFingerprint = fp;
-      }
+      // Re-fingerprint after read so WAL growth during the spawn is not missed.
+      this.lastDbFingerprint = fingerprintSqlite(dbPath) ?? fp ?? undefined;
 
       const currentTotal = (result.inputTokens ?? 0) + (result.outputTokens ?? 0);
       const scope = getScopeConfig();
@@ -139,7 +198,7 @@ export class CursorUsageReader {
         }
         await this.context.globalState.update(IMPORTED_KEY, true);
         await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
-        if (announce) {
+        if (wantAnnounce) {
           vscode.window.showInformationMessage(
             `BlueToken: Cursor baseline set (${currentTotal.toLocaleString()} tokens).`
           );
@@ -151,9 +210,12 @@ export class CursorUsageReader {
       if (delta > 0) {
         const water = calculateWater(delta, CURSOR_MODEL_ID, scope, overrides);
         this.session.record(water, source);
+        // Composer often Applies the same reply into a file right after the bubble —
+        // suppress file-edit counting briefly to avoid double-billing.
+        suppressFileEditsFor(8_000);
         await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
         log.info(`Cursor +${delta} tokens (${source})`);
-        if (announce) {
+        if (wantAnnounce) {
           vscode.window.showInformationMessage(
             `BlueToken: +${water.formattedAmount} | ${delta.toLocaleString()} tokens from Cursor chat.`
           );
@@ -166,7 +228,7 @@ export class CursorUsageReader {
         log.warn(`Cursor total shrank ${lastTotal} → ${currentTotal}; baseline resynced`);
       }
 
-      if (announce) {
+      if (wantAnnounce) {
         vscode.window.showInformationMessage(
           `BlueToken: No new Cursor tokens (total ${currentTotal.toLocaleString()}).`
         );
@@ -182,6 +244,18 @@ export class CursorUsageReader {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
+    }
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+      this.debounce = undefined;
+    }
+    if (this.watcher) {
+      try {
+        this.watcher.close();
+      } catch {
+        /* ignore */
+      }
+      this.watcher = undefined;
     }
   }
 }

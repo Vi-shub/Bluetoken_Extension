@@ -2,6 +2,27 @@
 
 All notable changes to the BlueToken extension are documented here.
 
+## [0.1.7] - 2026-07-19
+
+### Fixed
+- Host isolation no longer wipes all-time totals (was rebuilding from the rolling session window).
+- Bulk-import repair now clears the correct versioned reader keys (`.v2` / `.v3` / `.v4`).
+- Cursor double-count: DB counts only `bubbleId` bubbles; file Apply is suppressed for 8s after a chat delta.
+- Poll clamps no longer force secondary (other-IDE) readers to 3s.
+- Copilot busy/refresh race could record the same delta twice.
+- Migrations finish before readers start (avoids race on activate).
+- Count-mode switches re-baseline instead of flooding the session with a huge jump.
+
+## [0.1.6] - 2026-07-18
+
+### Fixed
+- **Live Cursor updates**: fingerprint now includes SQLite `-wal`/`-shm` (old builds skipped polls until checkpoint, so only manual refresh showed new tokens).
+- **fs.watch** on Cursor/Antigravity DB folders — updates within ~250ms, plus a 3s backup poll (old 20s settings are capped).
+- **Cursor file writes**: Composer/agent edits into files are tracked again (chat DB alone never counted Apply/agent patches).
+
+### Improved
+- Cursor DB reader estimates from richer bubble text/code fields when `tokenCount` is 0.
+
 ## [0.1.5] - 2026-07-18
 
 ### Fixed

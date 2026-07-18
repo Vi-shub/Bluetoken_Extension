@@ -34,14 +34,24 @@ import {
 } from "./waterCalculator";
 import { listModelPickChoices } from "./modelRates";
 import { log } from "./log";
+import { detectHost, hostDisplayName } from "./host";
+import { fileEditsSuppressed } from "./editSuppress";
 
-/** Minimum characters in a single insertion to treat it as an AI edit. */
-const FILE_EDIT_MIN_CHARS = 40;
+/**
+ * AI / Composer / Agent inserts are usually bigger than a keystroke.
+ * Multi-line inserts with fewer chars still count (common for short AI patches).
+ */
+const FILE_EDIT_MIN_CHARS = 24;
+const FILE_EDIT_MIN_MULTILINE = 12;
 const LAST_MODEL_KEY = "bluetoken.lastModel";
+/** Coalesce rapid Composer/agent chunks into one session row. */
+const FILE_EDIT_COALESCE_MS = 800;
 
 export class LMTracker {
   private lastAutoTrackMs = 0;
   private context!: vscode.ExtensionContext;
+  private pendingFileChars = 0;
+  private fileFlushTimer: NodeJS.Timeout | undefined;
 
   constructor(private readonly session: SessionTracker) {}
 
@@ -58,31 +68,38 @@ export class LMTracker {
       ),
       vscode.commands.registerCommand("bluetoken.setModel", () =>
         this.pickAndRememberModel(true)
-      )
+      ),
+      {
+        dispose: () => {
+          if (this.fileFlushTimer) {
+            clearTimeout(this.fileFlushTimer);
+            this.flushPendingFileEdits();
+          }
+        },
+      }
     );
 
     setImmediate(() => {
-      // When Cursor's exact reader is active, its chat output already counts
-      // the code the AI writes into files — so skip the watcher to avoid
-      // double-counting. In other editors the watcher stays on.
+      // Chat DB readers do NOT count Composer/agent writes into files.
+      // Keep the file watcher on in every IDE (including Cursor).
       if (enableFileWatcher) {
         this.registerFileEditWatcher(context);
+        log.info(`File-edit watcher on (${hostDisplayName()})`);
       }
       this.patchSelectChatModels(context);
       this.registerChatParticipant(context);
     });
   }
 
-  // ── Layer 1: file-edit watcher (automatic, primary) ───────────────────────
+  // ── Layer 1: file-edit watcher (Composer / agent / Apply) ─────────────────
 
   private registerFileEditWatcher(context: vscode.ExtensionContext): void {
-    const watcher = vscode.workspace.onDidChangeTextDocument(async (event) => {
+    const watcher = vscode.workspace.onDidChangeTextDocument((event) => {
       const scheme = event.document.uri.scheme;
       if (scheme !== "file" && scheme !== "untitled") {
         return;
       }
 
-      // Ignore undo/redo — that text was already counted when first written.
       if (
         event.reason === vscode.TextDocumentChangeReason.Undo ||
         event.reason === vscode.TextDocumentChangeReason.Redo
@@ -91,45 +108,90 @@ export class LMTracker {
       }
 
       // Avoid double-counting with the LM proxy / participant.
-      if (Date.now() - this.lastAutoTrackMs < 1500) {
+      if (Date.now() - this.lastAutoTrackMs < 1200) {
         return;
       }
 
-      // Consider only large insertions (AI blocks), not per-keystroke typing.
-      const bigInsertions = event.contentChanges.filter(
-        (c) => c.text.length >= FILE_EDIT_MIN_CHARS
-      );
-      if (bigInsertions.length === 0) {
-        return;
-      }
-
-      // Filter out human pastes: if the inserted text matches the clipboard,
-      // the user pasted it — don't attribute it to AI.
-      let clipboard = "";
-      try {
-        clipboard = (await vscode.env.clipboard.readText()).trim();
-      } catch {
-        /* clipboard unavailable */
-      }
-
-      for (const change of bigInsertions) {
-        const text = change.text;
-        if (clipboard && text.trim() === clipboard) {
-          continue; // human paste
+      let added = 0;
+      for (const c of event.contentChanges) {
+        if (!this.looksLikeAiInsertion(c.text)) {
+          continue;
         }
-        const tokens = estimateTokens(text);
-        const model = this.getSavedModel();
-        const result = calculateWater(
-          tokens,
-          model,
-          getScopeConfig(),
-          getModelOverrides()
-        );
-        this.session.record(result, "AI edit in file");
+        added += c.text.length;
       }
+      if (added <= 0) {
+        return;
+      }
+
+      // Clipboard check is async — schedule via void IIFE without blocking coalesce.
+      void this.considerFileInsertion(added, event.contentChanges.map((c) => c.text).join(""));
     });
 
     context.subscriptions.push(watcher);
+  }
+
+  private looksLikeAiInsertion(text: string): boolean {
+    if (!text) {
+      return false;
+    }
+    if (text.length >= FILE_EDIT_MIN_CHARS) {
+      return true;
+    }
+    // Short multi-line patches (Composer often lands these).
+    if (text.includes("\n") && text.trim().length >= FILE_EDIT_MIN_MULTILINE) {
+      return true;
+    }
+    return false;
+  }
+
+  private async considerFileInsertion(charCount: number, sampleText: string): Promise<void> {
+    if (fileEditsSuppressed()) {
+      return;
+    }
+
+    // Exact clipboard match → human paste (only when paste is sizable).
+    if (sampleText.trim().length >= FILE_EDIT_MIN_CHARS) {
+      try {
+        const clipboard = (await vscode.env.clipboard.readText()).trim();
+        if (clipboard && sampleText.trim() === clipboard) {
+          return;
+        }
+      } catch {
+        /* clipboard unavailable */
+      }
+    }
+
+    this.pendingFileChars += charCount;
+    if (this.fileFlushTimer) {
+      clearTimeout(this.fileFlushTimer);
+    }
+    this.fileFlushTimer = setTimeout(() => this.flushPendingFileEdits(), FILE_EDIT_COALESCE_MS);
+  }
+
+  private flushPendingFileEdits(): void {
+    this.fileFlushTimer = undefined;
+    const chars = this.pendingFileChars;
+    this.pendingFileChars = 0;
+    if (chars < FILE_EDIT_MIN_MULTILINE) {
+      return;
+    }
+    if (fileEditsSuppressed()) {
+      return;
+    }
+
+    const tokens = Math.max(1, Math.ceil(chars / 4));
+    const host = detectHost();
+    const model =
+      host === "cursor" ? "cursor-agent" : host === "antigravity" ? "gemini" : this.getSavedModel();
+    const result = calculateWater(tokens, model, getScopeConfig(), getModelOverrides());
+    const source =
+      host === "cursor"
+        ? "Cursor AI edit in file"
+        : host === "antigravity"
+          ? "Antigravity AI edit in file"
+          : "VS Code AI edit in file";
+    this.session.record(result, source);
+    log.info(`${source}: +${tokens} tokens (~${chars} chars)`);
   }
 
   // ── Layer 2: safe proxy of vscode.lm.selectChatModels ─────────────────────

@@ -24,9 +24,6 @@ export function activate(context: vscode.ExtensionContext): void {
   const sessionTracker = new SessionTracker(context);
   const statusBar = new BlueTokenStatusBar();
 
-  void repairBulkHistoryImport(context, sessionTracker);
-  void isolateHostSession(context, sessionTracker, host);
-
   const panelProvider = new BlueTokenPanel(context.extensionUri, sessionTracker);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider("bluetoken.panel", panelProvider, {
@@ -112,47 +109,10 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  const cfg = vscode.workspace.getConfiguration("bluetoken");
-  const pollMs = Math.max(3, cfg.get<number>("pollIntervalSeconds", 5)) * 1000;
-  const trackOtherIdes = cfg.get<boolean>("trackOtherIdes", false);
-  const intervals = pollIntervalsMs(pollMs);
-
   const cursorReader = new CursorUsageReader(context, sessionTracker);
   const copilotReader = new CopilotUsageReader(context, sessionTracker);
   const antigravityReader = new AntigravityUsageReader(context, sessionTracker);
-
-  const trackCursor = cfg.get<boolean>("trackCursorChat", true);
-  const trackCopilot = cfg.get<boolean>("trackCopilotChat", true);
-  const trackAg = cfg.get<boolean>("trackAntigravityChat", true);
-
-  const activeReaders = readersToStart({
-    trackCursor,
-    trackCopilot,
-    trackAntigravity: trackAg,
-    trackOtherIdes,
-    host,
-  });
-
-  log.info(
-    `Settings trackCursor=${trackCursor} trackCopilot=${trackCopilot} trackAntigravity=${trackAg} trackOtherIdes=${trackOtherIdes} pollMs=${pollMs}`
-  );
-  log.info(
-    `Host=${hostDisplayName(host)} activeReaders=${activeReaders.join(",") || "(none)"} intervals cursor=${intervals.cursor}ms ag=${intervals.antigravity}ms copilot=${intervals.copilot}ms`
-  );
-  log.info(
-    `Availability cursor=${cursorReader.isAvailable()} copilot=${copilotReader.isAvailable()} antigravity=${antigravityReader.isAvailable()}`
-  );
-
-  // Only start this IDE's chat reader(s) unless trackOtherIdes is on.
-  if (activeReaders.includes("cursor")) {
-    cursorReader.start(intervals.cursor);
-  }
-  if (activeReaders.includes("copilot")) {
-    copilotReader.start(intervals.copilot);
-  }
-  if (activeReaders.includes("antigravity")) {
-    antigravityReader.start(intervals.antigravity);
-  }
+  const activeReaders: string[] = [];
 
   context.subscriptions.push(
     vscode.commands.registerCommand("bluetoken.refresh", async () => {
@@ -182,28 +142,71 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: () => antigravityReader.dispose() }
   );
 
-  setImmediate(() => {
-    sessionTracker.emitInitial();
-  });
+  // Run migrations first, then start readers — avoids racing isolation against first poll.
+  void (async () => {
+    await repairBulkHistoryImport(context, sessionTracker);
+    await isolateHostSession(context, sessionTracker, host);
 
-  const installed = context.globalState.get<boolean>("bluetoken.installed");
-  if (!installed) {
-    void context.globalState.update("bluetoken.installed", true);
-    vscode.window
-      .showInformationMessage(
-        "BlueToken is active. If chat tracking fails on a new machine, run BlueToken: Diagnose and check Output → BlueToken.",
-        "Open Panel",
-        "Diagnose"
-      )
-      .then((choice) => {
-        if (choice === "Open Panel") {
-          vscode.commands.executeCommand("bluetoken.panel.focus");
-        }
-        if (choice === "Diagnose") {
-          vscode.commands.executeCommand("bluetoken.diagnose");
-        }
-      });
-  }
+    const cfg = vscode.workspace.getConfiguration("bluetoken");
+    const pollSec = Math.min(30, Math.max(2, cfg.get<number>("pollIntervalSeconds", 3)));
+    const pollMs = pollSec * 1000;
+    const trackOtherIdes = cfg.get<boolean>("trackOtherIdes", false);
+    const intervals = pollIntervalsMs(pollMs);
+
+    const trackCursor = cfg.get<boolean>("trackCursorChat", true);
+    const trackCopilot = cfg.get<boolean>("trackCopilotChat", true);
+    const trackAg = cfg.get<boolean>("trackAntigravityChat", true);
+
+    const planned = readersToStart({
+      trackCursor,
+      trackCopilot,
+      trackAntigravity: trackAg,
+      trackOtherIdes,
+      host,
+    });
+    activeReaders.push(...planned);
+
+    log.info(
+      `Settings trackCursor=${trackCursor} trackCopilot=${trackCopilot} trackAntigravity=${trackAg} trackOtherIdes=${trackOtherIdes} pollMs=${pollMs}`
+    );
+    log.info(
+      `Host=${hostDisplayName(host)} activeReaders=${activeReaders.join(",") || "(none)"} intervals cursor=${intervals.cursor}ms ag=${intervals.antigravity}ms copilot=${intervals.copilot}ms`
+    );
+    log.info(
+      `Availability cursor=${cursorReader.isAvailable()} copilot=${copilotReader.isAvailable()} antigravity=${antigravityReader.isAvailable()}`
+    );
+
+    if (activeReaders.includes("cursor")) {
+      cursorReader.start(intervals.cursor);
+    }
+    if (activeReaders.includes("copilot")) {
+      copilotReader.start(intervals.copilot);
+    }
+    if (activeReaders.includes("antigravity")) {
+      antigravityReader.start(intervals.antigravity);
+    }
+
+    sessionTracker.emitInitial();
+
+    const installed = context.globalState.get<boolean>("bluetoken.installed");
+    if (!installed) {
+      void context.globalState.update("bluetoken.installed", true);
+      vscode.window
+        .showInformationMessage(
+          "BlueToken is active. If chat tracking fails on a new machine, run BlueToken: Diagnose and check Output → BlueToken.",
+          "Open Panel",
+          "Diagnose"
+        )
+        .then((choice) => {
+          if (choice === "Open Panel") {
+            vscode.commands.executeCommand("bluetoken.panel.focus");
+          }
+          if (choice === "Diagnose") {
+            vscode.commands.executeCommand("bluetoken.diagnose");
+          }
+        });
+    }
+  })();
 }
 
 export function deactivate(): void {}
@@ -225,10 +228,14 @@ async function repairBulkHistoryImport(
   }
 
   session.resetAllTime();
-  await context.globalState.update("bluetoken.cursor.historyImported", false);
-  await context.globalState.update("bluetoken.cursor.lastTotalTokens", 0);
-  await context.globalState.update("bluetoken.antigravity.historyImported", false);
-  await context.globalState.update("bluetoken.antigravity.lastTotalTokens", 0);
+  // Must match the versioned keys the live readers use.
+  await context.globalState.update("bluetoken.cursor.historyImported.v2", false);
+  await context.globalState.update("bluetoken.cursor.lastTotalTokens.v2", 0);
+  await context.globalState.update("bluetoken.antigravity.historyImported.v4", false);
+  await context.globalState.update("bluetoken.antigravity.lastTotalTokens.v4", 0);
+  await context.globalState.update("bluetoken.antigravity.stepCursor.v4", {});
+  await context.globalState.update("bluetoken.copilot.historyImported.v3", false);
+  await context.globalState.update("bluetoken.copilot.lastTotalTokens.v3", 0);
   await context.globalState.update(FLAG, true);
   log.warn("Repaired bulk history import bug");
 

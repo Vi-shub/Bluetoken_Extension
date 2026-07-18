@@ -39,9 +39,12 @@ interface SeenState {
  */
 export class CopilotUsageReader {
   private timer: NodeJS.Timeout | undefined;
+  private debounce: NodeJS.Timeout | undefined;
   private disposed = false;
   private busy = false;
+  private pendingAnnounce = false;
   private lastFingerprint: string | undefined;
+  private lastMode: string | undefined;
   private cachedScan:
     | { total: number; seen: SeenState; detail: string; fingerprint: string }
     | undefined;
@@ -131,14 +134,25 @@ export class CopilotUsageReader {
     return this.userDataDirs.length > 0;
   }
 
-  start(intervalMs = 5000): void {
-    log.info(`Copilot reader start dirs=${this.userDataDirs.join(" | ")}`);
-    setTimeout(() => void this.poll(), 800);
-    this.timer = setInterval(() => void this.poll(), intervalMs);
+  start(intervalMs = 3000): void {
+    const ms = Math.max(2000, Math.min(intervalMs, 60_000));
+    log.info(`Copilot reader start dirs=${this.userDataDirs.join(" | ")} intervalMs=${ms}`);
+    setTimeout(() => void this.poll(), 400);
+    this.timer = setInterval(() => void this.poll(), ms);
   }
 
   async refreshNow(): Promise<void> {
     await this.poll(true);
+  }
+
+  private schedulePoll(): void {
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+    }
+    this.debounce = setTimeout(() => {
+      this.debounce = undefined;
+      void this.poll(false);
+    }, 250);
   }
 
   private countMode(): "outputOnly" | "incremental" | "fullApi" {
@@ -155,23 +169,48 @@ export class CopilotUsageReader {
     if (this.disposed) {
       return;
     }
-    if (this.busy && !announce) {
+    if (announce) {
+      this.pendingAnnounce = true;
+    }
+    if (this.busy) {
+      if (!announce) {
+        this.schedulePoll();
+      }
       return;
     }
     if (this.userDataDirs.length === 0) {
       log.warn("Copilot: no user data dirs found");
-      if (announce) {
+      if (this.pendingAnnounce) {
+        this.pendingAnnounce = false;
         vscode.window.showWarningMessage("BlueToken: Could not locate VS Code/Copilot user data.");
       }
       return;
     }
 
     this.busy = true;
+    const wantAnnounce = this.pendingAnnounce;
+    this.pendingAnnounce = false;
     try {
       const mode = this.countMode();
-      const { total, seen, detail, fingerprint } = this.scanAll(mode, announce);
-      if (fingerprint === this.lastFingerprint && !announce) {
-        // Unchanged on disk — skip accounting work and noisy logs.
+      const { total, seen, detail, fingerprint } = this.scanAll(mode, wantAnnounce);
+
+      // Count-mode switch changes the scale of totals — re-baseline, don't flood session.
+      if (this.lastMode && this.lastMode !== mode) {
+        log.warn(`Copilot count mode changed ${this.lastMode} → ${mode}; baseline resynced`);
+        await this.context.globalState.update(LAST_TOKENS_KEY, total);
+        await this.context.globalState.update(SEEN_KEY, seen);
+        this.lastFingerprint = fingerprint;
+        this.lastMode = mode;
+        if (wantAnnounce) {
+          vscode.window.showInformationMessage(
+            `BlueToken: Copilot mode changed — baseline set to ${total.toLocaleString()} tokens.`
+          );
+        }
+        return;
+      }
+      this.lastMode = mode;
+
+      if (fingerprint === this.lastFingerprint && !wantAnnounce) {
         return;
       }
       this.lastFingerprint = fingerprint;
@@ -191,7 +230,7 @@ export class CopilotUsageReader {
         await this.context.globalState.update(IMPORTED_KEY, true);
         await this.context.globalState.update(LAST_TOKENS_KEY, total);
         await this.context.globalState.update(SEEN_KEY, seen);
-        if (announce) {
+        if (wantAnnounce) {
           vscode.window.showInformationMessage(
             `BlueToken: Copilot baseline set (${total.toLocaleString()} tokens).`
           );
@@ -205,7 +244,7 @@ export class CopilotUsageReader {
         this.session.record(water, "Copilot chat (exact)");
         await this.context.globalState.update(LAST_TOKENS_KEY, total);
         log.info(`Copilot +${delta} tokens`);
-        if (announce) {
+        if (wantAnnounce) {
           vscode.window.showInformationMessage(
             `BlueToken: +${water.formattedAmount} | ${delta.toLocaleString()} tokens from Copilot.`
           );
@@ -213,12 +252,12 @@ export class CopilotUsageReader {
       } else if (delta < 0) {
         await this.context.globalState.update(LAST_TOKENS_KEY, total);
         log.warn(`Copilot total shrank ${lastTotal} → ${total} (often after de-dupe; baseline resynced)`);
-        if (announce) {
+        if (wantAnnounce) {
           vscode.window.showInformationMessage(
             `BlueToken: Copilot baseline resynced (${total.toLocaleString()} tokens).`
           );
         }
-      } else if (announce) {
+      } else if (wantAnnounce) {
         vscode.window.showInformationMessage(
           `BlueToken: No new Copilot tokens (total ${total.toLocaleString()}). See Output → BlueToken.`
         );
@@ -454,6 +493,10 @@ export class CopilotUsageReader {
       clearInterval(this.timer);
       this.timer = undefined;
     }
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+      this.debounce = undefined;
+    }
   }
 }
 
@@ -461,6 +504,8 @@ interface TurnTokens {
   promptTokens?: number;
   outputTokens?: number;
   text?: string;
+  /** Assistant reply only, when separable from the prompt. */
+  responseText?: string;
 }
 
 function billTurn(
@@ -480,8 +525,11 @@ function billTurn(
     }
     return out + incrementalPrompt();
   }
-  if (turn.text) {
-    return estimateTokens(turn.text);
+  // Text fallback: prefer response-only in outputOnly mode.
+  const text =
+    mode === "outputOnly" ? turn.responseText || turn.text : turn.text || turn.responseText;
+  if (text) {
+    return estimateTokens(text);
   }
   return 0;
 }
@@ -528,22 +576,27 @@ function extractTurn(turn: unknown): TurnTokens {
     metadata?.outputTokens ?? metadata?.completionTokens ?? metadata?.responseTokens
   );
   const message = t.message as Record<string, unknown> | undefined;
-  const textParts: string[] = [];
+  const promptParts: string[] = [];
+  const responseParts: string[] = [];
   if (typeof message?.text === "string") {
-    textParts.push(message.text);
+    promptParts.push(message.text);
   }
   if (typeof t.prompt === "string") {
-    textParts.push(t.prompt);
+    promptParts.push(t.prompt);
   }
   if (Array.isArray(t.response)) {
-    textParts.push(collectText(t.response));
+    responseParts.push(collectText(t.response));
   } else if (typeof t.response === "string") {
-    textParts.push(t.response);
+    responseParts.push(t.response);
   }
+  const responseText = responseParts.join(" ").trim() || undefined;
+  const promptText = promptParts.join(" ").trim();
+  const text = [promptText, responseText].filter(Boolean).join(" ").trim() || undefined;
   return {
     promptTokens,
     outputTokens,
-    text: textParts.join(" ").trim() || undefined,
+    text,
+    responseText,
   };
 }
 

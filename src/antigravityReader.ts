@@ -15,11 +15,15 @@ const AG_MODEL_ID = "gemini";
 
 export class AntigravityUsageReader {
   private timer: NodeJS.Timeout | undefined;
+  private debounce: NodeJS.Timeout | undefined;
+  private watcher: fs.FSWatcher | undefined;
   private readonly scriptPath: string;
   private disposed = false;
   private busy = false;
   private consecutiveFailures = 0;
   private lastDirFingerprint: string | undefined;
+  private lastMode: string | undefined;
+  private pendingAnnounce = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -81,16 +85,43 @@ export class AntigravityUsageReader {
     return AntigravityUsageReader.locateConversationsDir() !== null;
   }
 
-  start(intervalMs = 5000): void {
-    log.info(
-      `Antigravity reader start available=${this.isAvailable()} dir=${AntigravityUsageReader.locateConversationsDir()}`
-    );
-    setTimeout(() => void this.poll(), 600);
-    this.timer = setInterval(() => void this.poll(), intervalMs);
+  start(intervalMs = 3000): void {
+    const ms = Math.max(2000, Math.min(intervalMs, 60_000));
+    const dir = AntigravityUsageReader.locateConversationsDir();
+    log.info(`Antigravity reader start available=${this.isAvailable()} dir=${dir} intervalMs=${ms}`);
+    setTimeout(() => void this.poll(), 300);
+    this.timer = setInterval(() => void this.poll(), ms);
+    this.startFsWatch(dir);
   }
 
   async refreshNow(): Promise<void> {
     await this.poll(true);
+  }
+
+  private startFsWatch(dir: string | null): void {
+    if (!dir) {
+      return;
+    }
+    try {
+      this.watcher = fs.watch(dir, () => {
+        if (!this.disposed) {
+          this.schedulePoll();
+        }
+      });
+      log.debug(`Antigravity fs.watch on ${dir}`);
+    } catch (e) {
+      log.warn(`Antigravity fs.watch failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private schedulePoll(): void {
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+    }
+    this.debounce = setTimeout(() => {
+      this.debounce = undefined;
+      void this.poll(false);
+    }, 250);
   }
 
   private countMode(): "outputOnly" | "incremental" | "fullApi" {
@@ -110,7 +141,13 @@ export class AntigravityUsageReader {
     if (this.disposed) {
       return;
     }
-    if (this.busy && !announce) {
+    if (announce) {
+      this.pendingAnnounce = true;
+    }
+    if (this.busy) {
+      if (!announce) {
+        this.schedulePoll();
+      }
       return;
     }
 
@@ -119,7 +156,8 @@ export class AntigravityUsageReader {
       log.warn(
         `Antigravity conversations not found. Tried: ${AntigravityUsageReader.listCandidateDirs().join(" | ")}`
       );
-      if (announce) {
+      if (this.pendingAnnounce) {
+        this.pendingAnnounce = false;
         vscode.window.showWarningMessage(
           "BlueToken: Antigravity conversations folder not found. See Output → BlueToken."
         );
@@ -129,22 +167,30 @@ export class AntigravityUsageReader {
 
     if (!fs.existsSync(this.scriptPath)) {
       log.error(`Antigravity script missing: ${this.scriptPath}`);
+      if (this.pendingAnnounce) {
+        this.pendingAnnounce = false;
+        vscode.window.showWarningMessage(
+          "BlueToken: Antigravity reader script missing. Reinstall the extension."
+        );
+      }
       return;
     }
 
     const dirFp = fingerprintDbDir(dir);
-    if (!announce && dirFp && dirFp === this.lastDirFingerprint) {
+    const wantAnnounce = this.pendingAnnounce;
+    if (!wantAnnounce && dirFp && dirFp === this.lastDirFingerprint) {
       return;
     }
 
     this.busy = true;
+    this.pendingAnnounce = false;
     try {
       const mode = this.countMode();
       const result = await runDbReader(this.scriptPath, dir, 45000, [mode]);
       if (!result.ok || result.inputTokens === undefined || result.outputTokens === undefined) {
         this.consecutiveFailures++;
         log.error(`Antigravity poll failed (#${this.consecutiveFailures}): ${result.error}`);
-        if (announce || this.consecutiveFailures === 1 || this.consecutiveFailures === 5) {
+        if (wantAnnounce || this.consecutiveFailures === 1 || this.consecutiveFailures === 5) {
           vscode.window.showWarningMessage(
             `BlueToken: Antigravity reader failed (${result.error ?? "unknown"}). See Output → BlueToken.`
           );
@@ -152,9 +198,7 @@ export class AntigravityUsageReader {
         return;
       }
       this.consecutiveFailures = 0;
-      if (dirFp) {
-        this.lastDirFingerprint = dirFp;
-      }
+      this.lastDirFingerprint = fingerprintDbDir(dir) ?? dirFp ?? undefined;
 
       const currentTotal = result.inputTokens + result.outputTokens;
       const events = result.events ?? [];
@@ -164,6 +208,25 @@ export class AntigravityUsageReader {
       const imported = this.context.globalState.get<boolean>(IMPORTED_KEY, false);
       const lastTotal = this.context.globalState.get<number>(LAST_TOKENS_KEY, 0);
       const stepCursor = this.context.globalState.get<Record<string, number>>(STEP_CURSOR_KEY, {});
+
+      // Mode switch changes the scale of totals — re-baseline without flooding session.
+      if (this.lastMode && this.lastMode !== mode) {
+        log.warn(`Antigravity count mode changed ${this.lastMode} → ${mode}; baseline resynced`);
+        const nextCursor: Record<string, number> = { ...stepCursor };
+        for (const e of events) {
+          nextCursor[e.sessionId] = Math.max(nextCursor[e.sessionId] ?? -1, e.idx);
+        }
+        await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
+        await this.context.globalState.update(STEP_CURSOR_KEY, nextCursor);
+        this.lastMode = mode;
+        if (wantAnnounce) {
+          vscode.window.showInformationMessage(
+            `BlueToken: Antigravity mode changed — baseline set to ${currentTotal.toLocaleString()} tokens.`
+          );
+        }
+        return;
+      }
+      this.lastMode = mode;
 
       log.debug(
         `Antigravity poll total=${currentTotal} events=${events.length} mode=${mode} imported=${imported}`
@@ -182,7 +245,7 @@ export class AntigravityUsageReader {
         await this.context.globalState.update(IMPORTED_KEY, true);
         await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
         await this.context.globalState.update(STEP_CURSOR_KEY, nextCursor);
-        if (announce) {
+        if (wantAnnounce) {
           vscode.window.showInformationMessage(
             `BlueToken: Antigravity baseline set (${currentTotal.toLocaleString()} tokens).`
           );
@@ -220,7 +283,7 @@ export class AntigravityUsageReader {
         log.warn(`Antigravity fallback delta +${currentTotal - lastTotal} (no new events matched)`);
       }
 
-      if (announce) {
+      if (wantAnnounce) {
         if (recorded > 0) {
           vscode.window.showInformationMessage(
             `BlueToken: +${recorded.toLocaleString()} Antigravity tokens.`
@@ -241,6 +304,18 @@ export class AntigravityUsageReader {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
+    }
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+      this.debounce = undefined;
+    }
+    if (this.watcher) {
+      try {
+        this.watcher.close();
+      } catch {
+        /* ignore */
+      }
+      this.watcher = undefined;
     }
   }
 }

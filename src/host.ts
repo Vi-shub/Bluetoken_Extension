@@ -82,37 +82,36 @@ export function readersToStart(opts: {
 /**
  * Poll the host's own chat source often; poll other IDEs less often
  * (only when trackOtherIdes is enabled).
+ *
+ * Primary host is capped at 3s even if the user still has an old 20s setting,
+ * so chat updates feel live without needing manual refresh.
  */
 export function pollIntervalsMs(baseMs: number): {
   cursor: number;
   antigravity: number;
   copilot: number;
 } {
-  const base = Math.max(3_000, baseMs);
-  const slow = Math.max(base * 4, 30_000);
+  const configured = Math.max(2_000, baseMs);
+  const fast = Math.min(configured, 3_000);
+  const slow = Math.max(fast * 6, 30_000);
   const host = detectHost();
   switch (host) {
     case "cursor":
-      return { cursor: base, antigravity: slow, copilot: slow };
+      return { cursor: fast, antigravity: slow, copilot: slow };
     case "antigravity":
-      return { cursor: slow, antigravity: base, copilot: slow };
+      return { cursor: slow, antigravity: fast, copilot: slow };
     case "vscode":
-      return { cursor: slow, antigravity: slow, copilot: base };
+      return { cursor: slow, antigravity: slow, copilot: fast };
     default:
-      return { cursor: base, antigravity: base, copilot: base };
+      return { cursor: fast, antigravity: fast, copilot: fast };
   }
 }
 
 /** Whether a recorded session entry belongs to this host's native chat source. */
 export function entryBelongsToHost(source: string, host: HostKind = detectHost()): boolean {
   const s = source.toLowerCase();
-  // Manual / shared actions stay visible in every IDE.
-  if (
-    s.includes("quick-track") ||
-    s.includes("manual log") ||
-    s.includes("ai edit") ||
-    s.includes("(auto)")
-  ) {
+  // Manual actions stay visible in every IDE.
+  if (s.includes("quick-track") || s.includes("manual log") || s.includes("(auto)")) {
     return true;
   }
   switch (host) {
@@ -121,7 +120,7 @@ export function entryBelongsToHost(source: string, host: HostKind = detectHost()
     case "antigravity":
       return s.includes("antigravity");
     case "vscode":
-      return s.includes("copilot");
+      return s.includes("copilot") || s.includes("vs code") || s.includes("vscode");
     default:
       return true;
   }

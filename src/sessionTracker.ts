@@ -40,14 +40,12 @@ export class SessionTracker {
   readonly onDidUpdate = this._onDidUpdate.event;
 
   constructor(private readonly context: vscode.ExtensionContext) {
-    // Restore previous session data from persistent storage.
     this.entries = context.globalState.get<SessionEntry[]>(HISTORY_KEY, []);
     this.sessionStartMs = context.globalState.get<number>(SESSION_START_KEY, Date.now());
     this.allTimeMl = context.globalState.get<number>(ALL_TIME_ML_KEY, 0);
     this.allTimeTokens = context.globalState.get<number>(ALL_TIME_TOKENS_KEY, 0);
   }
 
-  /** Call once after subscriptions are wired so the panel/bar get initial data. */
   emitInitial(): void {
     this._onDidUpdate.fire(this.getStats());
   }
@@ -64,12 +62,9 @@ export class SessionTracker {
     };
 
     this.entries.push(entry);
-
-    // Update all-time counters.
     this.allTimeMl += result.totalMl;
     this.allTimeTokens += result.tokens;
 
-    // Persist — keep only the latest MAX_STORED_ENTRIES.
     const toStore = this.entries.slice(-MAX_STORED_ENTRIES);
     void this.context.globalState.update(HISTORY_KEY, toStore);
     void this.context.globalState.update(ALL_TIME_ML_KEY, this.allTimeMl);
@@ -78,11 +73,6 @@ export class SessionTracker {
     this._onDidUpdate.fire(this.getStats());
   }
 
-  /**
-   * Adds to the all-time totals WITHOUT touching the current session — used to
-   * import pre-existing history (e.g. Cursor's exact lifetime token count) on
-   * first run, so the lifetime footprint is shown without flooding the session.
-   */
   addAllTime(tokens: number, ml: number): void {
     this.allTimeMl += ml;
     this.allTimeTokens += tokens;
@@ -92,27 +82,28 @@ export class SessionTracker {
   }
 
   /**
-   * Drop session rows that came from another IDE's chat reader.
-   * Rebuilds all-time totals from remaining entries (best-effort cleanup).
-   * Returns how many entries were removed.
+   * Drop session rows from other IDEs. Subtracts those rows from all-time
+   * (does NOT rebuild all-time from the rolling entry window — that would
+   * wipe history imported via addAllTime).
    */
   keepOnlyHostEntries(host: HostKind): number {
     const before = this.entries.length;
-    const kept = this.entries.filter((e) => entryBelongsToHost(e.source, host));
-    const removed = before - kept.length;
-    if (removed <= 0) {
+    const removed = this.entries.filter((e) => !entryBelongsToHost(e.source, host));
+    if (removed.length <= 0) {
       return 0;
     }
 
-    this.entries = kept;
-    this.allTimeMl = kept.reduce((s, e) => s + e.mlUsed, 0);
-    this.allTimeTokens = kept.reduce((s, e) => s + e.tokens, 0);
+    const removedMl = removed.reduce((s, e) => s + e.mlUsed, 0);
+    const removedTokens = removed.reduce((s, e) => s + e.tokens, 0);
+    this.entries = this.entries.filter((e) => entryBelongsToHost(e.source, host));
+    this.allTimeMl = Math.max(0, this.allTimeMl - removedMl);
+    this.allTimeTokens = Math.max(0, this.allTimeTokens - removedTokens);
 
     void this.context.globalState.update(HISTORY_KEY, this.entries.slice(-MAX_STORED_ENTRIES));
     void this.context.globalState.update(ALL_TIME_ML_KEY, this.allTimeMl);
     void this.context.globalState.update(ALL_TIME_TOKENS_KEY, this.allTimeTokens);
     this._onDidUpdate.fire(this.getStats());
-    return removed;
+    return before - this.entries.length;
   }
 
   getStats(): SessionStats {
@@ -129,7 +120,6 @@ export class SessionTracker {
     };
   }
 
-  /** Reset the current session counter only (all-time totals are preserved). */
   resetSession(): void {
     this.entries = [];
     this.sessionStartMs = Date.now();
@@ -138,7 +128,6 @@ export class SessionTracker {
     this._onDidUpdate.fire(this.getStats());
   }
 
-  /** Wipe everything — session + all-time totals. */
   resetAllTime(): void {
     this.entries = [];
     this.sessionStartMs = Date.now();

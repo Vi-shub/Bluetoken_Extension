@@ -2,7 +2,7 @@
   "name": "bluetoken",
   "displayName": "BlueToken: AI Water Footprint",
   "description": "See the freshwater your AI assistant costs — Cursor, VS Code/Copilot, and Antigravity. Open source: https://github.com/Vi-shub/Bluetoken_Extension · Author: https://www.shubhamvishwakarma.com",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "publisher": "bluetoken",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -204,9 +204,10 @@
         },
         "bluetoken.pollIntervalSeconds": {
           "type": "number",
-          "default": 5,
-          "minimum": 3,
-          "description": "How often (in seconds) BlueToken reads this IDE's chat data. Lower = faster updates, slightly more CPU."
+          "default": 3,
+          "minimum": 2,
+          "maximum": 30,
+          "description": "Backup poll interval (seconds). Live updates also use file watchers; this IDE's reader is capped at 3s even if you set higher."
         }
       }
     },
