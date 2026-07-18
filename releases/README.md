@@ -27,6 +27,4 @@ In Cursor / VS Code / Antigravity:
 
 ## GitHub Releases
 
-When publishing on GitHub, attach the matching `.vsix` from this folder to a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github) tagged `v<version>`.
-
-> Binary `.vsix` files are gitignored by default (keep the repo light). Build locally or CI, then upload to GitHub Releases.
+Prebuilt `.vsix` files in this folder are tracked in git. When publishing on GitHub, you can also attach the matching file to a [GitHub Release](https://docs.github.com/en/repositories/releasing-projects-on-github) tagged `v<version>`.
