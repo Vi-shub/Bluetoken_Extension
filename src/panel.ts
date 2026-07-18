@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { SessionTracker, SessionStats } from "./sessionTracker";
 import { formatWater, toComparison } from "./waterCalculator";
 import { LINKS, isPlaceholderUrl } from "./links";
+import { hostDisplayName } from "./host";
 
 export class BlueTokenPanel implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -57,6 +58,7 @@ export class BlueTokenPanel implements vscode.WebviewViewProvider {
 
   private buildHtml(stats: SessionStats): string {
     const { totalMl, totalTokens, messageCount, entries, sessionStartMs, allTimeMl, allTimeTokens } = stats;
+    const hostLabel = hostDisplayName();
 
     // Scale the glass to a sensible capacity for the current session size.
     const glassCapMl =
@@ -302,7 +304,7 @@ export class BlueTokenPanel implements vscode.WebviewViewProvider {
   </div>
   <div class="stat-block">
     <div class="stat-value">${sessionLabel}</div>
-    <div class="stat-label">freshwater · this session</div>
+    <div class="stat-label">freshwater · ${escHtml(hostLabel)} session</div>
   </div>
 </div>
 

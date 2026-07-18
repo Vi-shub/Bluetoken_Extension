@@ -1,8 +1,8 @@
 {
   "name": "bluetoken",
   "displayName": "BlueToken: AI Water Footprint",
-  "description": "See the freshwater consumed by data centers to power your AI assistant. Works with Cursor, Copilot, and any AI tool. Track any response with one shortcut.",
-  "version": "0.1.4",
+  "description": "See the freshwater your AI assistant costs — Cursor, VS Code/Copilot, and Antigravity. Open source: https://github.com/Vi-shub/Bluetoken_Extension · Author: https://www.shubhamvishwakarma.com",
+  "version": "0.1.5",
   "publisher": "bluetoken",
   "license": "MIT",
   "icon": "resources/icon.png",
@@ -33,6 +33,8 @@
     "carbon",
     "copilot",
     "cursor",
+    "antigravity",
+    "gemini",
     "tokens",
     "green"
   ],
@@ -153,17 +155,22 @@
         "bluetoken.trackCursorChat": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically track EXACT token usage from Cursor's chat by reading Cursor's local database (read-only). No data leaves your machine."
+          "description": "Track Cursor chat when running inside Cursor (read-only local DB). Ignored in other IDEs unless Track Other IDEs is on."
         },
         "bluetoken.trackCopilotChat": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically track GitHub Copilot chat by reading the editor's saved chat sessions and estimating tokens from the text."
+          "description": "Track GitHub Copilot / VS Code Chat when running inside VS Code. Ignored in other IDEs unless Track Other IDEs is on."
         },
         "bluetoken.trackAntigravityChat": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically track EXACT token usage from Antigravity by decoding Protobuf gen_metadata in ~/.gemini/antigravity-ide/conversations/*.db (read-only)."
+          "description": "Track Antigravity Gemini chat when running inside Antigravity. Ignored in other IDEs unless Track Other IDEs is on."
+        },
+        "bluetoken.trackOtherIdes": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also import chat usage from other editors installed on this machine. Off by default so each IDE keeps a separate water count."
         },
         "bluetoken.antigravityCountMode": {
           "type": "string",
@@ -197,9 +204,9 @@
         },
         "bluetoken.pollIntervalSeconds": {
           "type": "number",
-          "default": 20,
-          "minimum": 10,
-          "description": "How often (in seconds) BlueToken reads the editor's chat databases to update usage."
+          "default": 5,
+          "minimum": 3,
+          "description": "How often (in seconds) BlueToken reads this IDE's chat data. Lower = faster updates, slightly more CPU."
         }
       }
     },

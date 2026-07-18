@@ -2,6 +2,18 @@
 
 All notable changes to the BlueToken extension are documented here.
 
+## [0.1.5] - 2026-07-18
+
+### Fixed
+- **Per-IDE isolation**: VS Code / Cursor / Antigravity no longer import each other's chat into one total. Each editor tracks only its own chat by default.
+- **Faster auto-updates**: default poll interval is 5s (was 20s); first poll starts within ~1s so manual refresh is rarely needed.
+- One-time cleanup removes foreign IDE rows that older builds mixed into the session.
+
+### Added
+- Setting `bluetoken.trackOtherIdes` (default off) if you explicitly want combined cross-editor tracking.
+- Expanded model rates for Cursor (Composer, Agent), Copilot/VS Code Chat, and Antigravity Gemini (2.5 Pro/Flash/Flash-Lite, 2.0).
+- Marketplace description links to GitHub and [shubhamvishwakarma.com](https://www.shubhamvishwakarma.com).
+
 ## [0.1.4] - 2026-07-16
 
 ### Improved

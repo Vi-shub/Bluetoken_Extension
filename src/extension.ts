@@ -9,15 +9,23 @@ import { AntigravityUsageReader } from "./antigravityReader";
 import { log } from "./log";
 import { runDiagnostics } from "./diagnose";
 import { LINKS, isPlaceholderUrl } from "./links";
+import {
+  detectHost,
+  hostDisplayName,
+  pollIntervalsMs,
+  readersToStart,
+} from "./host";
 
 export function activate(context: vscode.ExtensionContext): void {
   log.init(context);
-  log.info(`Activating BlueToken in ${vscode.env.appName}`);
+  const host = detectHost();
+  log.info(`Activating BlueToken in ${vscode.env.appName} (host=${host})`);
 
   const sessionTracker = new SessionTracker(context);
   const statusBar = new BlueTokenStatusBar();
 
   void repairBulkHistoryImport(context, sessionTracker);
+  void isolateHostSession(context, sessionTracker, host);
 
   const panelProvider = new BlueTokenPanel(context.extensionUri, sessionTracker);
   context.subscriptions.push(
@@ -105,7 +113,9 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   const cfg = vscode.workspace.getConfiguration("bluetoken");
-  const pollMs = Math.max(10, cfg.get<number>("pollIntervalSeconds", 20)) * 1000;
+  const pollMs = Math.max(3, cfg.get<number>("pollIntervalSeconds", 5)) * 1000;
+  const trackOtherIdes = cfg.get<boolean>("trackOtherIdes", false);
+  const intervals = pollIntervalsMs(pollMs);
 
   const cursorReader = new CursorUsageReader(context, sessionTracker);
   const copilotReader = new CopilotUsageReader(context, sessionTracker);
@@ -115,32 +125,49 @@ export function activate(context: vscode.ExtensionContext): void {
   const trackCopilot = cfg.get<boolean>("trackCopilotChat", true);
   const trackAg = cfg.get<boolean>("trackAntigravityChat", true);
 
+  const activeReaders = readersToStart({
+    trackCursor,
+    trackCopilot,
+    trackAntigravity: trackAg,
+    trackOtherIdes,
+    host,
+  });
+
   log.info(
-    `Settings trackCursor=${trackCursor} trackCopilot=${trackCopilot} trackAntigravity=${trackAg} pollMs=${pollMs}`
+    `Settings trackCursor=${trackCursor} trackCopilot=${trackCopilot} trackAntigravity=${trackAg} trackOtherIdes=${trackOtherIdes} pollMs=${pollMs}`
+  );
+  log.info(
+    `Host=${hostDisplayName(host)} activeReaders=${activeReaders.join(",") || "(none)"} intervals cursor=${intervals.cursor}ms ag=${intervals.antigravity}ms copilot=${intervals.copilot}ms`
   );
   log.info(
     `Availability cursor=${cursorReader.isAvailable()} copilot=${copilotReader.isAvailable()} antigravity=${antigravityReader.isAvailable()}`
   );
 
-  // Always start enabled readers — they retry if paths appear later.
-  if (trackCursor) {
-    cursorReader.start(pollMs);
+  // Only start this IDE's chat reader(s) unless trackOtherIdes is on.
+  if (activeReaders.includes("cursor")) {
+    cursorReader.start(intervals.cursor);
   }
-  if (trackCopilot) {
-    copilotReader.start(pollMs);
+  if (activeReaders.includes("copilot")) {
+    copilotReader.start(intervals.copilot);
   }
-  if (trackAg) {
-    antigravityReader.start(pollMs);
+  if (activeReaders.includes("antigravity")) {
+    antigravityReader.start(intervals.antigravity);
   }
 
   context.subscriptions.push(
     vscode.commands.registerCommand("bluetoken.refresh", async () => {
       log.info("Manual refresh requested");
-      await Promise.all([
-        cursorReader.refreshNow(),
-        copilotReader.refreshNow(),
-        antigravityReader.refreshNow(),
-      ]);
+      const jobs: Promise<unknown>[] = [];
+      if (activeReaders.includes("cursor")) {
+        jobs.push(cursorReader.refreshNow());
+      }
+      if (activeReaders.includes("copilot")) {
+        jobs.push(copilotReader.refreshNow());
+      }
+      if (activeReaders.includes("antigravity")) {
+        jobs.push(antigravityReader.refreshNow());
+      }
+      await Promise.all(jobs);
     })
   );
 
@@ -208,4 +235,50 @@ async function repairBulkHistoryImport(
   vscode.window.showInformationMessage(
     "BlueToken: Fixed a display bug: lifetime history was wrongly shown as this session. All-time will re-import shortly; session starts fresh."
   );
+}
+
+/**
+ * One-time cleanup: older builds imported every IDE's chat into whichever
+ * editor was open. Drop foreign session rows and reset foreign reader baselines
+ * so VS Code no longer shows Antigravity/Cursor water, etc.
+ */
+async function isolateHostSession(
+  context: vscode.ExtensionContext,
+  session: SessionTracker,
+  host: ReturnType<typeof detectHost>
+): Promise<void> {
+  const FLAG = "bluetoken.hostIsolated.v2";
+  if (context.globalState.get<boolean>(FLAG, false)) {
+    return;
+  }
+
+  const removed = session.keepOnlyHostEntries(host);
+  // Clear baselines for readers this host will no longer run, so a future
+  // opt-in to trackOtherIdes does not instantly replay huge deltas.
+  if (host !== "cursor") {
+    await context.globalState.update("bluetoken.cursor.historyImported.v2", false);
+    await context.globalState.update("bluetoken.cursor.lastTotalTokens.v2", 0);
+  }
+  if (host !== "vscode" && host !== "other") {
+    await context.globalState.update("bluetoken.copilot.historyImported.v3", false);
+    await context.globalState.update("bluetoken.copilot.lastTotalTokens.v3", 0);
+    await context.globalState.update("bluetoken.copilot.seen.v3", { files: {} });
+  }
+  if (host !== "antigravity") {
+    await context.globalState.update("bluetoken.antigravity.historyImported.v4", false);
+    await context.globalState.update("bluetoken.antigravity.lastTotalTokens.v4", 0);
+    await context.globalState.update("bluetoken.antigravity.stepCursor.v4", {});
+  }
+
+  await context.globalState.update(FLAG, true);
+  if (removed > 0) {
+    log.warn(
+      `Host isolation: removed ${removed} foreign session entries for ${hostDisplayName(host)}`
+    );
+    vscode.window.showInformationMessage(
+      `BlueToken: Counts are now separate per IDE. Cleared ${removed} entries from other editors in this ${hostDisplayName(host)} session.`
+    );
+  } else {
+    log.info(`Host isolation applied for ${hostDisplayName(host)} (no foreign entries)`);
+  }
 }

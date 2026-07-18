@@ -15,6 +15,7 @@ import {
   normalizePathKey,
   realPathSafe,
 } from "./pollUtils";
+import { detectHost } from "./host";
 
 const SEEN_KEY = "bluetoken.copilot.seen.v3";
 const IMPORTED_KEY = "bluetoken.copilot.historyImported.v3";
@@ -57,7 +58,16 @@ export class CopilotUsageReader {
     return CopilotUsageReader.locateAllUserDataDirs(context)[0] ?? null;
   }
 
+  /**
+   * By default only the current IDE's User folder is scanned so VS Code does not
+   * pick up Cursor/Antigravity chat files (and vice versa). Set
+   * bluetoken.trackOtherIdes to scan every known editor profile.
+   */
   static locateAllUserDataDirs(context: vscode.ExtensionContext): string[] {
+    const trackOther = vscode.workspace
+      .getConfiguration("bluetoken")
+      .get<boolean>("trackOtherIdes", false);
+
     const found = new Map<string, string>();
     const add = (p: string): void => {
       try {
@@ -71,10 +81,28 @@ export class CopilotUsageReader {
       }
     };
 
+    // Always prefer this host's own User dir from the extension context.
     try {
       add(path.dirname(path.dirname(context.globalStorageUri.fsPath)));
     } catch {
       /* ignore */
+    }
+
+    if (!trackOther) {
+      // Still add the canonical folder for this host (helps if globalStorage path is odd).
+      const home = os.homedir();
+      const appdata = process.env.APPDATA ?? path.join(home, "AppData", "Roaming");
+      const host = detectHost();
+      if (host === "vscode") {
+        add(path.join(appdata, "Code", "User"));
+        add(path.join(appdata, "Code - Insiders", "User"));
+      } else if (host === "cursor") {
+        add(path.join(appdata, "Cursor", "User"));
+      } else if (host === "antigravity") {
+        add(path.join(appdata, "Antigravity IDE", "User"));
+        add(path.join(appdata, "Antigravity", "User"));
+      }
+      return [...found.values()];
     }
 
     const home = os.homedir();
@@ -103,10 +131,9 @@ export class CopilotUsageReader {
     return this.userDataDirs.length > 0;
   }
 
-  start(intervalMs = 20000): void {
+  start(intervalMs = 5000): void {
     log.info(`Copilot reader start dirs=${this.userDataDirs.join(" | ")}`);
-    // Stagger after Cursor/Antigravity so we don't stampede the disk together.
-    setTimeout(() => void this.poll(), 7000);
+    setTimeout(() => void this.poll(), 800);
     this.timer = setInterval(() => void this.poll(), intervalMs);
   }
 

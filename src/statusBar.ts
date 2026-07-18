@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { SessionStats } from "./sessionTracker";
 import { formatWater } from "./waterCalculator";
+import { hostDisplayName } from "./host";
 
 /** Color thresholds for the status bar pill (session total in mL). */
 const THRESHOLDS = {
@@ -44,7 +45,7 @@ export class BlueTokenStatusBar {
   private buildTooltip(stats: SessionStats, lastLabel: string): vscode.MarkdownString {
     const md = new vscode.MarkdownString();
     md.isTrusted = true;
-    md.appendMarkdown(`**BlueToken: AI Water Footprint**\n\n`);
+    md.appendMarkdown(`**BlueToken: AI Water Footprint** _(this IDE: ${hostDisplayName()})_\n\n`);
     md.appendMarkdown(`Session total: **${formatWater(stats.totalMl)}** (${stats.totalMl.toFixed(2)} mL)\n\n`);
     md.appendMarkdown(`Last message: **${lastLabel}**\n\n`);
     md.appendMarkdown(`Messages: ${stats.messageCount}  |  Tokens: ${stats.totalTokens.toLocaleString()}\n\n`);

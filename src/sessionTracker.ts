@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { WaterResult } from "./waterCalculator";
+import { HostKind, entryBelongsToHost } from "./host";
 
 export interface SessionEntry {
   timestamp: number;
@@ -88,6 +89,30 @@ export class SessionTracker {
     void this.context.globalState.update(ALL_TIME_ML_KEY, this.allTimeMl);
     void this.context.globalState.update(ALL_TIME_TOKENS_KEY, this.allTimeTokens);
     this._onDidUpdate.fire(this.getStats());
+  }
+
+  /**
+   * Drop session rows that came from another IDE's chat reader.
+   * Rebuilds all-time totals from remaining entries (best-effort cleanup).
+   * Returns how many entries were removed.
+   */
+  keepOnlyHostEntries(host: HostKind): number {
+    const before = this.entries.length;
+    const kept = this.entries.filter((e) => entryBelongsToHost(e.source, host));
+    const removed = before - kept.length;
+    if (removed <= 0) {
+      return 0;
+    }
+
+    this.entries = kept;
+    this.allTimeMl = kept.reduce((s, e) => s + e.mlUsed, 0);
+    this.allTimeTokens = kept.reduce((s, e) => s + e.tokens, 0);
+
+    void this.context.globalState.update(HISTORY_KEY, this.entries.slice(-MAX_STORED_ENTRIES));
+    void this.context.globalState.update(ALL_TIME_ML_KEY, this.allTimeMl);
+    void this.context.globalState.update(ALL_TIME_TOKENS_KEY, this.allTimeTokens);
+    this._onDidUpdate.fire(this.getStats());
+    return removed;
   }
 
   getStats(): SessionStats {

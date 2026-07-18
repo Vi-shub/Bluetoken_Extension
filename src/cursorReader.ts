@@ -66,10 +66,10 @@ export class CursorUsageReader {
     return CursorUsageReader.locateDb() !== null;
   }
 
-  start(intervalMs = 20000): void {
+  start(intervalMs = 5000): void {
     log.info(`Cursor reader start available=${this.isAvailable()} intervalMs=${intervalMs}`);
     // Always poll — DB may appear later after Cursor creates storage.
-    setTimeout(() => void this.poll(false), 1500);
+    setTimeout(() => void this.poll(false), 500);
     this.timer = setInterval(() => void this.poll(false), intervalMs);
   }
 

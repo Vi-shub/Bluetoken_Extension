@@ -81,11 +81,11 @@ export class AntigravityUsageReader {
     return AntigravityUsageReader.locateConversationsDir() !== null;
   }
 
-  start(intervalMs = 20000): void {
+  start(intervalMs = 5000): void {
     log.info(
       `Antigravity reader start available=${this.isAvailable()} dir=${AntigravityUsageReader.locateConversationsDir()}`
     );
-    setTimeout(() => void this.poll(), 4000);
+    setTimeout(() => void this.poll(), 600);
     this.timer = setInterval(() => void this.poll(), intervalMs);
   }
 
