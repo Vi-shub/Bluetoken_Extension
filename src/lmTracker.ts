@@ -35,17 +35,18 @@ import {
 import { listModelPickChoices } from "./modelRates";
 import { log } from "./log";
 import { detectHost, hostDisplayName } from "./host";
-import { fileEditsSuppressed } from "./editSuppress";
 
 /**
  * AI / Composer / Agent inserts are usually bigger than a keystroke.
  * Multi-line inserts with fewer chars still count (common for short AI patches).
+ * Cursor Agent often lands many small chunks in one event — we also sum those.
  */
-const FILE_EDIT_MIN_CHARS = 24;
-const FILE_EDIT_MIN_MULTILINE = 12;
+const FILE_EDIT_MIN_CHARS = 20;
+const FILE_EDIT_MIN_MULTILINE = 8;
+const FILE_EDIT_BATCH_MIN = 20;
 const LAST_MODEL_KEY = "bluetoken.lastModel";
 /** Coalesce rapid Composer/agent chunks into one session row. */
-const FILE_EDIT_COALESCE_MS = 800;
+const FILE_EDIT_COALESCE_MS = 600;
 
 export class LMTracker {
   private lastAutoTrackMs = 0;
@@ -96,6 +97,7 @@ export class LMTracker {
   private registerFileEditWatcher(context: vscode.ExtensionContext): void {
     const watcher = vscode.workspace.onDidChangeTextDocument((event) => {
       const scheme = event.document.uri.scheme;
+      // Cursor/agent sometimes touch vscode-userdata / output; only count real docs.
       if (scheme !== "file" && scheme !== "untitled") {
         return;
       }
@@ -113,18 +115,30 @@ export class LMTracker {
       }
 
       let added = 0;
+      let totalInserted = 0;
       for (const c of event.contentChanges) {
-        if (!this.looksLikeAiInsertion(c.text)) {
-          continue;
+        const len = c.text?.length ?? 0;
+        totalInserted += len;
+        if (this.looksLikeAiInsertion(c.text)) {
+          added += len;
         }
-        added += c.text.length;
       }
+
+      // Agent/Composer often applies many small chunks in one event.
+      if (added <= 0 && totalInserted >= FILE_EDIT_BATCH_MIN && event.contentChanges.length >= 2) {
+        added = totalInserted;
+      }
+      // Large single replace (whole-file / big Apply).
+      if (added <= 0 && totalInserted >= 80) {
+        added = totalInserted;
+      }
+
       if (added <= 0) {
         return;
       }
 
-      // Clipboard check is async — schedule via void IIFE without blocking coalesce.
-      void this.considerFileInsertion(added, event.contentChanges.map((c) => c.text).join(""));
+      const sample = event.contentChanges.map((c) => c.text).join("");
+      void this.considerFileInsertion(added, sample, event.document.uri.fsPath);
     });
 
     context.subscriptions.push(watcher);
@@ -144,16 +158,17 @@ export class LMTracker {
     return false;
   }
 
-  private async considerFileInsertion(charCount: number, sampleText: string): Promise<void> {
-    if (fileEditsSuppressed()) {
-      return;
-    }
-
+  private async considerFileInsertion(
+    charCount: number,
+    sampleText: string,
+    filePath?: string
+  ): Promise<void> {
     // Exact clipboard match → human paste (only when paste is sizable).
     if (sampleText.trim().length >= FILE_EDIT_MIN_CHARS) {
       try {
         const clipboard = (await vscode.env.clipboard.readText()).trim();
         if (clipboard && sampleText.trim() === clipboard) {
+          log.debug(`File-edit skipped (clipboard paste) ~${charCount} chars`);
           return;
         }
       } catch {
@@ -162,6 +177,9 @@ export class LMTracker {
     }
 
     this.pendingFileChars += charCount;
+    if (filePath) {
+      log.debug(`File-edit pending +${charCount} chars in ${filePath.split(/[/\\]/).pop()}`);
+    }
     if (this.fileFlushTimer) {
       clearTimeout(this.fileFlushTimer);
     }
@@ -173,9 +191,6 @@ export class LMTracker {
     const chars = this.pendingFileChars;
     this.pendingFileChars = 0;
     if (chars < FILE_EDIT_MIN_MULTILINE) {
-      return;
-    }
-    if (fileEditsSuppressed()) {
       return;
     }
 

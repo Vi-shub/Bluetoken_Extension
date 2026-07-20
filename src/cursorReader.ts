@@ -7,7 +7,6 @@ import { SessionTracker } from "./sessionTracker";
 import { calculateWater, getScopeConfig, getModelOverrides } from "./waterCalculator";
 import { log } from "./log";
 import { fingerprintSqlite } from "./pollUtils";
-import { suppressFileEditsFor } from "./editSuppress";
 
 const LAST_TOKENS_KEY = "bluetoken.cursor.lastTotalTokens.v2";
 const IMPORTED_KEY = "bluetoken.cursor.historyImported.v2";
@@ -210,9 +209,6 @@ export class CursorUsageReader {
       if (delta > 0) {
         const water = calculateWater(delta, CURSOR_MODEL_ID, scope, overrides);
         this.session.record(water, source);
-        // Composer often Applies the same reply into a file right after the bubble —
-        // suppress file-edit counting briefly to avoid double-billing.
-        suppressFileEditsFor(8_000);
         await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
         log.info(`Cursor +${delta} tokens (${source})`);
         if (wantAnnounce) {

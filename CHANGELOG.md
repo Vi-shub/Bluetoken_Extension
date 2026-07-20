@@ -2,12 +2,18 @@
 
 All notable changes to the BlueToken extension are documented here.
 
+## [0.1.8] - 2026-07-20
+
+### Fixed
+- **Cursor file edits not capturing**: removed the 8s post-chat suppress that dropped Composer/Agent Applies (and pending coalesced edits).
+- File-edit watcher now counts multi-chunk agent batches and large single replaces; lower thresholds; debug logs for pending/skipped edits.
+
 ## [0.1.7] - 2026-07-19
 
 ### Fixed
 - Host isolation no longer wipes all-time totals (was rebuilding from the rolling session window).
 - Bulk-import repair now clears the correct versioned reader keys (`.v2` / `.v3` / `.v4`).
-- Cursor double-count: DB counts only `bubbleId` bubbles; file Apply is suppressed for 8s after a chat delta.
+- Cursor DB counts only `bubbleId` bubbles (file Apply is tracked separately by the file watcher).
 - Poll clamps no longer force secondary (other-IDE) readers to 3s.
 - Copilot busy/refresh race could record the same delta twice.
 - Migrations finish before readers start (avoids race on activate).
