@@ -2,7 +2,7 @@
   "name": "bluetoken",
   "displayName": "BlueToken: AI Water Footprint",
   "description": "See the freshwater your AI assistant costs — Cursor, VS Code/Copilot, and Antigravity. Open source: https://github.com/Vi-shub/Bluetoken_Extension · Author: https://www.shubhamvishwakarma.com",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "publisher": "bluetoken",
   "license": "MIT",
   "icon": "resources/icon.png",

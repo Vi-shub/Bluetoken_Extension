@@ -2,6 +2,27 @@
 
 All notable changes to the BlueToken extension are documented here.
 
+## [0.1.10] - 2026-07-20
+
+### Added
+- **Cursor DB file-edit tracking**: reads `codeBlockDiff:*` (Composer Apply) and agent `toolFormerData` Write/StrReplace from `state.vscdb`, recorded as `Cursor AI edit in file (db)`.
+- Tool-edit bubbles are excluded from chat text estimates to reduce double-counting; disk watcher is suppressed briefly when DB already counted an apply.
+
+### Fixed
+- Chat baseline spam after moving tool-edit text out of chat totals: **v3** keys + in-memory baselines + serialized polls (no more repeated “total shrank” every poll).
+
+## [0.1.9] - 2026-07-20
+
+### Added
+- **Cursor DB file-edit tracking**: reads `codeBlockDiff:*` (Composer Apply) and agent `toolFormerData` Write/StrReplace from `state.vscdb`, recorded as `Cursor AI edit in file (db)`.
+- Tool-edit bubbles are excluded from chat text estimates to reduce double-counting; disk watcher is suppressed briefly when DB already counted an apply.
+
+## [0.1.9] - 2026-07-20
+
+### Fixed
+- **Cursor Agent file edits**: Agent `Write`/`StrReplace` tools write to disk and often never fire `onDidChangeTextDocument`. Added a workspace disk watcher that counts size deltas while chat/agent activity is recent (3 min window).
+- Open-editor Apply path still works; doc vs disk deduped so the same edit is not billed twice.
+
 ## [0.1.8] - 2026-07-20
 
 ### Fixed

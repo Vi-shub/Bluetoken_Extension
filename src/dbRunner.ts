@@ -8,6 +8,10 @@ export interface DbReadResult {
   bubbles?: number;
   nonZero?: number;
   estimatedBubbles?: number;
+  /** Cursor Composer/Agent file-apply estimate (codeBlockDiff + tool writes). */
+  fileEditTokens?: number;
+  fileEditFromTools?: number;
+  fileEditFromDiffs?: number;
   steps?: number;
   sessions?: number;
   events?: Array<{ sessionId: string; idx: number; tokens: number; atMs: number }>;
@@ -69,7 +73,7 @@ export function runDbReader(
           log.warn(`dbReader fail: ${r.error} (script=${scriptPath} arg=${argPath})`);
         } else {
           log.debug(
-            `dbReader ok: in=${r.inputTokens} out=${r.outputTokens} bubbles=${r.bubbles} steps=${r.steps} events=${r.events?.length ?? 0}`
+            `dbReader ok: in=${r.inputTokens} out=${r.outputTokens} bubbles=${r.bubbles} fileEdit=${r.fileEditTokens ?? 0} (tools=${r.fileEditFromTools ?? 0} diffs=${r.fileEditFromDiffs ?? 0}) steps=${r.steps} events=${r.events?.length ?? 0}`
           );
         }
         resolve(r);

@@ -7,10 +7,14 @@ import { SessionTracker } from "./sessionTracker";
 import { calculateWater, getScopeConfig, getModelOverrides } from "./waterCalculator";
 import { log } from "./log";
 import { fingerprintSqlite } from "./pollUtils";
+import { markAiActivity, suppressDiskFileEditsFor } from "./aiActivity";
 
-const LAST_TOKENS_KEY = "bluetoken.cursor.lastTotalTokens.v2";
-const IMPORTED_KEY = "bluetoken.cursor.historyImported.v2";
+/** v3: chat totals exclude tool-edit bubble text (moved to file-edit metric). */
+const LAST_TOKENS_KEY = "bluetoken.cursor.lastTotalTokens.v3";
+const LAST_FILE_EDIT_KEY = "bluetoken.cursor.lastFileEditTokens.v3";
+const IMPORTED_KEY = "bluetoken.cursor.historyImported.v3";
 const CURSOR_MODEL_ID = "cursor-chat";
+const CURSOR_AGENT_MODEL_ID = "cursor-agent";
 
 export class CursorUsageReader {
   private timer: NodeJS.Timeout | undefined;
@@ -19,9 +23,13 @@ export class CursorUsageReader {
   private readonly scriptPath: string;
   private disposed = false;
   private busy = false;
+  private pollAgain = false;
   private consecutiveFailures = 0;
   private lastDbFingerprint: string | undefined;
   private pendingAnnounce = false;
+  /** In-memory baselines — avoid globalState races across overlapping polls. */
+  private memChatTotal: number | undefined;
+  private memFileEditTotal: number | undefined;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -70,7 +78,6 @@ export class CursorUsageReader {
   }
 
   start(intervalMs = 3000): void {
-    // Allow slow intervals when this reader is a secondary (trackOtherIdes).
     const ms = Math.max(2000, Math.min(intervalMs, 60_000));
     log.info(`Cursor reader start available=${this.isAvailable()} intervalMs=${ms}`);
     setTimeout(() => void this.poll(false), 300);
@@ -82,7 +89,6 @@ export class CursorUsageReader {
     return this.poll(true);
   }
 
-  /** Watch state.vscdb + WAL so updates land in ~300ms without waiting for the interval. */
   private startFsWatch(): void {
     const dbPath = CursorUsageReader.locateDb();
     if (!dbPath) {
@@ -113,13 +119,27 @@ export class CursorUsageReader {
   }
 
   private schedulePoll(): void {
+    if (this.busy) {
+      this.pollAgain = true;
+      return;
+    }
     if (this.debounce) {
       clearTimeout(this.debounce);
     }
     this.debounce = setTimeout(() => {
       this.debounce = undefined;
       void this.poll(false);
-    }, 250);
+    }, 400);
+  }
+
+  private async setChatBaseline(total: number): Promise<void> {
+    this.memChatTotal = total;
+    await this.context.globalState.update(LAST_TOKENS_KEY, total);
+  }
+
+  private async setFileEditBaseline(total: number): Promise<void> {
+    this.memFileEditTotal = total;
+    await this.context.globalState.update(LAST_FILE_EDIT_KEY, total);
   }
 
   private async poll(announce: boolean): Promise<{ delta: number; total: number } | null> {
@@ -130,41 +150,43 @@ export class CursorUsageReader {
       this.pendingAnnounce = true;
     }
     if (this.busy) {
-      // A live update arrived while we were reading — run again after.
-      if (!announce) {
-        this.schedulePoll();
-      }
+      this.pollAgain = true;
       return null;
     }
 
-    const dbPath = CursorUsageReader.locateDb();
-    if (!dbPath) {
-      log.warn(`Cursor DB not found. Tried: ${CursorUsageReader.listCandidateDbs().join(" | ")}`);
-      if (this.pendingAnnounce) {
-        this.pendingAnnounce = false;
-        vscode.window.showWarningMessage("BlueToken: Cursor state.vscdb not found on this machine.");
-      }
-      return null;
-    }
-
-    if (!fs.existsSync(this.scriptPath)) {
-      log.error(`Cursor reader script missing: ${this.scriptPath}`);
-      if (this.pendingAnnounce) {
-        this.pendingAnnounce = false;
-        vscode.window.showWarningMessage("BlueToken: Cursor reader script missing. Reinstall the extension.");
-      }
-      return null;
-    }
-
-    const fp = fingerprintSqlite(dbPath);
-    const wantAnnounce = this.pendingAnnounce;
-    if (!wantAnnounce && fp && fp === this.lastDbFingerprint) {
-      return null;
-    }
-
+    // Lock immediately so interval + fs.watch cannot overlap.
     this.busy = true;
-    this.pendingAnnounce = false;
+    this.pollAgain = false;
+
     try {
+      const dbPath = CursorUsageReader.locateDb();
+      if (!dbPath) {
+        log.warn(`Cursor DB not found. Tried: ${CursorUsageReader.listCandidateDbs().join(" | ")}`);
+        if (this.pendingAnnounce) {
+          this.pendingAnnounce = false;
+          vscode.window.showWarningMessage("BlueToken: Cursor state.vscdb not found on this machine.");
+        }
+        return null;
+      }
+
+      if (!fs.existsSync(this.scriptPath)) {
+        log.error(`Cursor reader script missing: ${this.scriptPath}`);
+        if (this.pendingAnnounce) {
+          this.pendingAnnounce = false;
+          vscode.window.showWarningMessage(
+            "BlueToken: Cursor reader script missing. Reinstall the extension."
+          );
+        }
+        return null;
+      }
+
+      const fp = fingerprintSqlite(dbPath);
+      const wantAnnounce = this.pendingAnnounce;
+      if (!wantAnnounce && fp && fp === this.lastDbFingerprint) {
+        return null;
+      }
+
+      this.pendingAnnounce = false;
       const result = await runCursorReader(this.scriptPath, dbPath, 45000);
       if (!result.ok || result.inputTokens === undefined) {
         this.consecutiveFailures++;
@@ -177,26 +199,49 @@ export class CursorUsageReader {
         return null;
       }
       this.consecutiveFailures = 0;
-      // Re-fingerprint after read so WAL growth during the spawn is not missed.
       this.lastDbFingerprint = fingerprintSqlite(dbPath) ?? fp ?? undefined;
 
       const currentTotal = (result.inputTokens ?? 0) + (result.outputTokens ?? 0);
+      const currentFileEdit = result.fileEditTokens ?? 0;
       const scope = getScopeConfig();
       const overrides = getModelOverrides();
       const estimated = result.estimatedBubbles ?? 0;
       const source = estimated > 0 ? "Cursor chat (exact+est.)" : "Cursor chat (exact)";
 
       const imported = this.context.globalState.get<boolean>(IMPORTED_KEY, false);
-      const lastTotal = this.context.globalState.get<number>(LAST_TOKENS_KEY, 0);
+      const lastTotal =
+        this.memChatTotal ?? this.context.globalState.get<number>(LAST_TOKENS_KEY, 0);
+      const storedFileEdit = this.context.globalState.get<number | undefined>(
+        LAST_FILE_EDIT_KEY,
+        undefined
+      );
+      const lastFileEdit = this.memFileEditTotal ?? storedFileEdit;
 
+      // Fresh install or v3 migration (new keys) — baseline only, no session flood.
       if (!imported || lastTotal === 0) {
         if (!imported && currentTotal > 0) {
           const historyWater = calculateWater(currentTotal, CURSOR_MODEL_ID, scope, overrides).totalMl;
           this.session.addAllTime(currentTotal, historyWater);
           log.info(`Cursor history imported to all-time: ${currentTotal} tokens`);
         }
+        if (lastFileEdit === undefined && currentFileEdit > 0) {
+          const feWater = calculateWater(
+            currentFileEdit,
+            CURSOR_AGENT_MODEL_ID,
+            scope,
+            overrides
+          ).totalMl;
+          this.session.addAllTime(currentFileEdit, feWater);
+          log.info(`Cursor file-edit history imported to all-time: ${currentFileEdit} tokens`);
+        }
         await this.context.globalState.update(IMPORTED_KEY, true);
-        await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
+        await this.setChatBaseline(currentTotal);
+        await this.setFileEditBaseline(currentFileEdit);
+        // Drop stale v2 baseline if present (accounting changed in 0.1.10).
+        await this.context.globalState.update("bluetoken.cursor.lastTotalTokens.v2", undefined);
+        log.info(
+          `Cursor v3 baseline set chat=${currentTotal} fileEdit=${currentFileEdit} (tools=${result.fileEditFromTools ?? 0} diffs=${result.fileEditFromDiffs ?? 0})`
+        );
         if (wantAnnounce) {
           vscode.window.showInformationMessage(
             `BlueToken: Cursor baseline set (${currentTotal.toLocaleString()} tokens).`
@@ -205,11 +250,33 @@ export class CursorUsageReader {
         return { delta: 0, total: currentTotal };
       }
 
+      if (lastFileEdit === undefined) {
+        await this.setFileEditBaseline(currentFileEdit);
+      } else {
+        const fileDelta = currentFileEdit - lastFileEdit;
+        if (fileDelta > 0) {
+          const water = calculateWater(fileDelta, CURSOR_AGENT_MODEL_ID, scope, overrides);
+          this.session.record(water, "Cursor AI edit in file (db)");
+          markAiActivity();
+          suppressDiskFileEditsFor(8_000);
+          await this.setFileEditBaseline(currentFileEdit);
+          log.info(
+            `Cursor AI edit in file (db): +${fileDelta} tokens (tools=${result.fileEditFromTools ?? 0} diffs=${result.fileEditFromDiffs ?? 0})`
+          );
+        } else if (fileDelta < 0) {
+          await this.setFileEditBaseline(currentFileEdit);
+          log.warn(
+            `Cursor file-edit total shrank ${lastFileEdit} → ${currentFileEdit}; baseline resynced`
+          );
+        }
+      }
+
       const delta = currentTotal - lastTotal;
       if (delta > 0) {
         const water = calculateWater(delta, CURSOR_MODEL_ID, scope, overrides);
         this.session.record(water, source);
-        await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
+        markAiActivity();
+        await this.setChatBaseline(currentTotal);
         log.info(`Cursor +${delta} tokens (${source})`);
         if (wantAnnounce) {
           vscode.window.showInformationMessage(
@@ -220,8 +287,10 @@ export class CursorUsageReader {
       }
 
       if (delta < 0) {
-        await this.context.globalState.update(LAST_TOKENS_KEY, currentTotal);
-        log.warn(`Cursor total shrank ${lastTotal} → ${currentTotal}; baseline resynced`);
+        await this.setChatBaseline(currentTotal);
+        log.info(
+          `Cursor chat baseline resynced ${lastTotal} → ${currentTotal} (method/accounting change)`
+        );
       }
 
       if (wantAnnounce) {
@@ -232,6 +301,10 @@ export class CursorUsageReader {
       return { delta: 0, total: currentTotal };
     } finally {
       this.busy = false;
+      if (this.pollAgain && !this.disposed) {
+        this.pollAgain = false;
+        setTimeout(() => void this.poll(false), 300);
+      }
     }
   }
 

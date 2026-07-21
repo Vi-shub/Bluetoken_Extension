@@ -7,6 +7,7 @@ import { SessionTracker } from "./sessionTracker";
 import { calculateWater, getScopeConfig, getModelOverrides } from "./waterCalculator";
 import { log } from "./log";
 import { fingerprintDbDir } from "./pollUtils";
+import { markAiActivity } from "./aiActivity";
 
 const LAST_TOKENS_KEY = "bluetoken.antigravity.lastTotalTokens.v4";
 const IMPORTED_KEY = "bluetoken.antigravity.historyImported.v4";
@@ -264,6 +265,7 @@ export class AntigravityUsageReader {
         if (e.tokens > 0) {
           const water = calculateWater(e.tokens, AG_MODEL_ID, scope, overrides);
           this.session.record(water, "Antigravity chat (exact)", e.atMs > 0 ? e.atMs : undefined);
+          markAiActivity();
           recorded += e.tokens;
           log.info(
             `Antigravity +${e.tokens} tokens @ ${e.atMs || "now"} (session ${e.sessionId.slice(0, 8)} idx ${e.idx})`

@@ -5,9 +5,10 @@
  * ────────────────────
  * There are two surfaces where AI produces output:
  *
- *   A. AI writing into a FILE (inline completions, "Apply", agent/Composer
- *      edits). This fires `onDidChangeTextDocument`, so we CAN capture it
- *      automatically in every VSCode-based IDE (Cursor, Antigravity, Copilot).
+ *   A. AI writing into a FILE:
+ *      - Composer "Apply" / open-editor inserts → `onDidChangeTextDocument`
+ *      - Cursor Agent Write/StrReplace tools → disk writes (often NO text-doc
+ *        event). Captured via workspace FileSystemWatcher while AI is active.
  *
  *   B. AI answering only in a CHAT BUBBLE (a Q&A that never touches a file).
  *      Native chat panels in Cursor, Antigravity, and Copilot all use private
@@ -15,7 +16,7 @@
  *      shortcut (select the reply + Ctrl+Alt+W).
  *
  * Layers implemented here:
- *   1. File-edit watcher      — automatic, primary. Filters pastes/undo.
+ *   1. File-edit watchers     — text-doc + disk (Cursor/AG). Filters pastes.
  *   2. selectChatModels proxy — automatic for the (rare) extensions that use
  *                               the public LM API. Written defensively so it
  *                               can never break another extension.
@@ -35,24 +36,35 @@ import {
 import { listModelPickChoices } from "./modelRates";
 import { log } from "./log";
 import { detectHost, hostDisplayName } from "./host";
+import { aiActiveRecently, diskFileEditsSuppressed, markAiActivity } from "./aiActivity";
 
 /**
  * AI / Composer / Agent inserts are usually bigger than a keystroke.
  * Multi-line inserts with fewer chars still count (common for short AI patches).
  * Cursor Agent often lands many small chunks in one event — we also sum those.
  */
-const FILE_EDIT_MIN_CHARS = 20;
-const FILE_EDIT_MIN_MULTILINE = 8;
-const FILE_EDIT_BATCH_MIN = 20;
+const FILE_EDIT_MIN_CHARS = 16;
+const FILE_EDIT_MIN_MULTILINE = 6;
+const FILE_EDIT_BATCH_MIN = 12;
 const LAST_MODEL_KEY = "bluetoken.lastModel";
 /** Coalesce rapid Composer/agent chunks into one session row. */
-const FILE_EDIT_COALESCE_MS = 600;
+const FILE_EDIT_COALESCE_MS = 700;
+/** Disk writes within this window after chat activity count as agent edits. */
+const DISK_AI_WINDOW_MS = 180_000;
+const DISK_MIN_GROWTH = 12;
+
+const DISK_IGNORE =
+  /[\\/](node_modules|\.git|\.cursor|out|dist|build|releases|\.vsix|__pycache__|\.next)[\\/]/i;
 
 export class LMTracker {
   private lastAutoTrackMs = 0;
   private context!: vscode.ExtensionContext;
   private pendingFileChars = 0;
   private fileFlushTimer: NodeJS.Timeout | undefined;
+  /** Last known on-disk size per fsPath (for agent Write/StrReplace). */
+  private diskSizes = new Map<string, number>();
+  /** Paths recently counted via TextDocument — avoid double-billing disk. */
+  private recentDocPaths = new Map<string, number>();
 
   constructor(private readonly session: SessionTracker) {}
 
@@ -85,14 +97,20 @@ export class LMTracker {
       // Keep the file watcher on in every IDE (including Cursor).
       if (enableFileWatcher) {
         this.registerFileEditWatcher(context);
-        log.info(`File-edit watcher on (${hostDisplayName()})`);
+        const host = detectHost();
+        if (host === "cursor" || host === "antigravity") {
+          this.registerDiskEditWatcher(context);
+          log.info(`File-edit watcher on (${hostDisplayName()}, text+disk)`);
+        } else {
+          log.info(`File-edit watcher on (${hostDisplayName()})`);
+        }
       }
       this.patchSelectChatModels(context);
       this.registerChatParticipant(context);
     });
   }
 
-  // ── Layer 1: file-edit watcher (Composer / agent / Apply) ─────────────────
+  // ── Layer 1a: open-editor Apply / Composer inserts ─────────────────────────
 
   private registerFileEditWatcher(context: vscode.ExtensionContext): void {
     const watcher = vscode.workspace.onDidChangeTextDocument((event) => {
@@ -119,6 +137,11 @@ export class LMTracker {
       for (const c of event.contentChanges) {
         const len = c.text?.length ?? 0;
         totalInserted += len;
+        // Whole-range replace (common for Apply): count inserted text.
+        if (len > 0 && (c.rangeLength ?? 0) > 0 && len >= FILE_EDIT_MIN_MULTILINE) {
+          added += len;
+          continue;
+        }
         if (this.looksLikeAiInsertion(c.text)) {
           added += len;
         }
@@ -129,7 +152,7 @@ export class LMTracker {
         added = totalInserted;
       }
       // Large single replace (whole-file / big Apply).
-      if (added <= 0 && totalInserted >= 80) {
+      if (added <= 0 && totalInserted >= 48) {
         added = totalInserted;
       }
 
@@ -137,11 +160,146 @@ export class LMTracker {
         return;
       }
 
+      markAiActivity();
+      const fsPath = event.document.uri.scheme === "file" ? event.document.uri.fsPath : undefined;
+      if (fsPath) {
+        this.recentDocPaths.set(fsPath, Date.now());
+        this.diskSizes.set(fsPath, Buffer.byteLength(event.document.getText(), "utf8"));
+      }
       const sample = event.contentChanges.map((c) => c.text).join("");
-      void this.considerFileInsertion(added, sample, event.document.uri.fsPath);
+      void this.considerFileInsertion(added, sample, fsPath, "doc");
     });
 
     context.subscriptions.push(watcher);
+  }
+
+  /**
+   * Cursor Agent Write/StrReplace write to disk; they often never fire
+   * onDidChangeTextDocument for third-party extensions. Catch those here
+   * while chat/agent activity was recently seen.
+   */
+  private registerDiskEditWatcher(context: vscode.ExtensionContext): void {
+    const folders = vscode.workspace.workspaceFolders;
+    if (!folders?.length) {
+      log.warn("Disk file-edit watcher: no workspace folder open");
+      return;
+    }
+
+    for (const folder of folders) {
+      const pattern = new vscode.RelativePattern(folder, "**/*");
+      const watcher = vscode.workspace.createFileSystemWatcher(pattern);
+      const onUri = (uri: vscode.Uri, kind: "change" | "create") => {
+        void this.considerDiskEdit(uri, kind);
+      };
+      watcher.onDidChange((uri) => onUri(uri, "change"));
+      watcher.onDidCreate((uri) => onUri(uri, "create"));
+      context.subscriptions.push(watcher);
+    }
+    log.debug(`Disk file-edit watcher on ${folders.length} folder(s)`);
+    // Snapshot sizes now so the first Agent Write is a delta, not a missed baseline.
+    void this.baselineWorkspaceSizes();
+  }
+
+  private async baselineWorkspaceSizes(): Promise<void> {
+    try {
+      const uris = await vscode.workspace.findFiles(
+        "**/*",
+        "{**/node_modules/**,**/.git/**,**/out/**,**/dist/**,**/releases/**,**/.cursor/**}",
+        3000
+      );
+      let n = 0;
+      for (const uri of uris) {
+        if (DISK_IGNORE.test(uri.fsPath)) {
+          continue;
+        }
+        try {
+          const st = await vscode.workspace.fs.stat(uri);
+          if (!this.diskSizes.has(uri.fsPath)) {
+            this.diskSizes.set(uri.fsPath, st.size);
+            n++;
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+      log.debug(`Disk size baseline: ${n} files`);
+    } catch (e) {
+      log.warn(`Disk size baseline failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  private async considerDiskEdit(uri: vscode.Uri, kind: "change" | "create"): Promise<void> {
+    if (uri.scheme !== "file") {
+      return;
+    }
+    const fsPath = uri.fsPath;
+    if (DISK_IGNORE.test(fsPath)) {
+      return;
+    }
+    // Human typing saves happen without recent AI; agent tools write during AI window.
+    if (!aiActiveRecently(DISK_AI_WINDOW_MS)) {
+      // Still baseline sizes so the next AI write has a delta.
+      try {
+        const st = await vscode.workspace.fs.stat(uri);
+        this.diskSizes.set(fsPath, st.size);
+      } catch {
+        /* missing */
+      }
+      return;
+    }
+
+    // Cursor DB already billed this apply via codeBlockDiff / toolFormerData.
+    if (diskFileEditsSuppressed()) {
+      try {
+        const st = await vscode.workspace.fs.stat(uri);
+        this.diskSizes.set(fsPath, st.size);
+      } catch {
+        /* missing */
+      }
+      return;
+    }
+
+    // Already counted via TextDocument for this path.
+    const docAt = this.recentDocPaths.get(fsPath) ?? 0;
+    if (Date.now() - docAt < 2500) {
+      return;
+    }
+
+    let size = 0;
+    try {
+      const st = await vscode.workspace.fs.stat(uri);
+      size = st.size;
+    } catch {
+      return;
+    }
+
+    const prev = this.diskSizes.get(fsPath);
+    this.diskSizes.set(fsPath, size);
+
+    let chars = 0;
+    if (prev === undefined) {
+      // First observation: baseline only (unless a brand-new file was created).
+      if (kind === "create") {
+        chars = Math.min(size, 200_000);
+      } else {
+        return;
+      }
+    } else if (size > prev) {
+      chars = size - prev;
+    } else if (size < prev) {
+      // Shrink / rewrite — count magnitude of change (StrReplace often shrinks).
+      chars = Math.min(prev - size, 100_000);
+    } else {
+      // Same byte size: ignore (avoids noisy re-saves). Equal-length StrReplace
+      // is rare; chat bubbles still capture the tool text estimate.
+      return;
+    }
+
+    if (chars < DISK_MIN_GROWTH) {
+      return;
+    }
+
+    void this.considerFileInsertion(chars, "", fsPath, "disk");
   }
 
   private looksLikeAiInsertion(text: string): boolean {
@@ -161,7 +319,8 @@ export class LMTracker {
   private async considerFileInsertion(
     charCount: number,
     sampleText: string,
-    filePath?: string
+    filePath?: string,
+    via: "doc" | "disk" = "doc"
   ): Promise<void> {
     // Exact clipboard match → human paste (only when paste is sizable).
     if (sampleText.trim().length >= FILE_EDIT_MIN_CHARS) {
@@ -178,7 +337,11 @@ export class LMTracker {
 
     this.pendingFileChars += charCount;
     if (filePath) {
-      log.debug(`File-edit pending +${charCount} chars in ${filePath.split(/[/\\]/).pop()}`);
+      log.debug(
+        `File-edit pending +${charCount} chars via=${via} in ${filePath.split(/[/\\]/).pop()}`
+      );
+    } else {
+      log.debug(`File-edit pending +${charCount} chars via=${via}`);
     }
     if (this.fileFlushTimer) {
       clearTimeout(this.fileFlushTimer);

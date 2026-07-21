@@ -3,16 +3,14 @@
  *
  * Usage:  <node> db-reader.js <cursorStateDbPath>
  * Output: one JSON line:
- *   { ok, inputTokens, outputTokens, bubbles, nonZero, estimatedBubbles }
+ *   { ok, inputTokens, outputTokens, bubbles, nonZero, estimatedBubbles,
+ *     fileEditTokens, fileEditSources }
  *
- * Only counts bubbleId rows (one logical chat/composer message each).
- * Extra KV keys (composerData / agentKv / messageRequestContext) often
- * duplicate the same content and inflate totals — file Apply is tracked
- * separately by the extension's file-edit watcher.
- *
- * Cursor often leaves tokenCount at 0 even when the bubble has text:
- *   - If input+output > 0 → exact counts
- *   - Else estimate from text / code fields
+ * Chat: bubbleId rows only (exact tokenCount or text estimate).
+ * File edits (separate total — do NOT mix into chat):
+ *   - codeBlockDiff:* payloads (Composer Apply diffs)
+ *   - bubble toolFormerData for Write / StrReplace / edit tools
+ * Tool-edit bubbles are excluded from chat text estimates to reduce double-count.
  */
 
 "use strict";
@@ -98,6 +96,161 @@ function tokensFromObject(o) {
   return { input: 0, output: 0, estimated: false };
 }
 
+/** Tool names that write/patch files (Cursor Agent / Composer). */
+const EDIT_TOOL_RE =
+  /^(write|strreplace|search_replace|apply_patch|edit_file|editfile|create_file|createfile|delete_file|notebook_edit|multiedit|applypatch)$/i;
+
+function toolNameOf(tf) {
+  if (!tf || typeof tf !== "object") {
+    return "";
+  }
+  return String(
+    tf.name ||
+      tf.tool ||
+      tf.toolName ||
+      tf.tool_name ||
+      tf.function?.name ||
+      tf.rawToolName ||
+      ""
+  );
+}
+
+function isFileEditTool(name) {
+  if (!name) {
+    return false;
+  }
+  const n = name.replace(/[^a-zA-Z0-9_]/g, "");
+  return EDIT_TOOL_RE.test(n) || /write|strreplace|searchreplace|applypatch|editfile/i.test(n);
+}
+
+function bubbleHasFileEditTool(o) {
+  if (!o || typeof o !== "object") {
+    return false;
+  }
+  if (o.toolFormerData && isFileEditTool(toolNameOf(o.toolFormerData))) {
+    return true;
+  }
+  if (Array.isArray(o.toolResults)) {
+    for (const t of o.toolResults) {
+      if (isFileEditTool(toolNameOf(t))) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function pushString(chunks, v) {
+  if (typeof v === "string" && v.length > 0) {
+    chunks.push(v);
+  }
+}
+
+/** Best-effort extract of "new file content" from a tool payload. */
+function contentFromToolPayload(tf) {
+  if (!tf || typeof tf !== "object") {
+    return "";
+  }
+  const chunks = [];
+  const params = tf.params || tf.parameters || tf.args || tf.input || tf.rawArgs || {};
+  const p = typeof params === "string" ? tryParseJson(params) || {} : params;
+
+  pushString(chunks, p.contents);
+  pushString(chunks, p.content);
+  pushString(chunks, p.new_string);
+  pushString(chunks, p.newString);
+  pushString(chunks, p.new_text);
+  pushString(chunks, p.newText);
+  pushString(chunks, p.updated_string);
+  pushString(chunks, p.code);
+  pushString(chunks, p.patch);
+  pushString(chunks, p.diff);
+
+  // Sometimes the whole args blob is a JSON string with nested fields.
+  if (typeof tf.rawArgs === "string" && tf.rawArgs.length > 20) {
+    const raw = tryParseJson(tf.rawArgs);
+    if (raw && typeof raw === "object") {
+      pushString(chunks, raw.contents);
+      pushString(chunks, raw.content);
+      pushString(chunks, raw.new_string);
+      pushString(chunks, raw.newString);
+    } else if (!p.contents && !p.new_string) {
+      // Fall back: count raw args length (rough) only if nothing else found.
+      if (chunks.length === 0) {
+        pushString(chunks, tf.rawArgs);
+      }
+    }
+  }
+
+  pushString(chunks, tf.result);
+  pushString(chunks, typeof tf.output === "string" ? tf.output : "");
+
+  return chunks.join("\n");
+}
+
+function tryParseJson(s) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+/** Extract added/new text from a codeBlockDiff value. */
+function contentFromDiff(o) {
+  if (!o || typeof o !== "object") {
+    return "";
+  }
+  const chunks = [];
+  pushString(chunks, o.newText);
+  pushString(chunks, o.new_text);
+  pushString(chunks, o.newString);
+  pushString(chunks, o.new_string);
+  pushString(chunks, o.contents);
+  pushString(chunks, o.content);
+  pushString(chunks, o.addedText);
+  pushString(chunks, o.updatedCode);
+  pushString(chunks, o.code);
+
+  if (typeof o.diff === "string") {
+    // Prefer added lines from unified diff.
+    const added = o.diff
+      .split(/\r?\n/)
+      .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+      .map((l) => l.slice(1))
+      .join("\n");
+    if (added.length > 0) {
+      pushString(chunks, added);
+    } else {
+      pushString(chunks, o.diff);
+    }
+  }
+
+  if (Array.isArray(o.changes)) {
+    for (const c of o.changes) {
+      if (!c) continue;
+      pushString(chunks, c.newText || c.new_text || c.added || c.text);
+    }
+  }
+
+  return chunks.join("\n");
+}
+
+function fileEditTokensFromBubble(o) {
+  let total = 0;
+  if (o.toolFormerData && isFileEditTool(toolNameOf(o.toolFormerData))) {
+    total += estimateTokens(contentFromToolPayload(o.toolFormerData));
+  }
+  if (Array.isArray(o.toolResults)) {
+    for (const t of o.toolResults) {
+      if (isFileEditTool(toolNameOf(t))) {
+        total += estimateTokens(contentFromToolPayload(t));
+      }
+    }
+  }
+  return total;
+}
+
 function main() {
   const dbPath = process.argv[2];
   if (!dbPath) {
@@ -119,17 +272,20 @@ function main() {
   }
 
   try {
-    const rows = db
+    const bubbles = db
       .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'bubbleId:%'")
       .all();
 
     let inputTokens = 0;
     let outputTokens = 0;
-    let bubbles = 0;
+    let bubbleCount = 0;
     let nonZero = 0;
     let estimatedBubbles = 0;
+    let fileEditTokens = 0;
+    let fileEditFromTools = 0;
+    let fileEditFromDiffs = 0;
 
-    for (const r of rows) {
+    for (const r of bubbles) {
       let o;
       try {
         o = JSON.parse(r.value.toString());
@@ -140,7 +296,29 @@ function main() {
         continue;
       }
 
-      bubbles++;
+      bubbleCount++;
+
+      // Agent Write/StrReplace → count under file edits, not chat text estimate.
+      const toolEditTok = fileEditTokensFromBubble(o);
+      if (toolEditTok > 0) {
+        fileEditTokens += toolEditTok;
+        fileEditFromTools++;
+      }
+
+      const isToolEdit = bubbleHasFileEditTool(o);
+      if (isToolEdit) {
+        // Still take exact tokenCount if Cursor stored it on the tool bubble.
+        const i = o.tokenCount ? Number(o.tokenCount.inputTokens) || 0 : 0;
+        const t = o.tokenCount ? Number(o.tokenCount.outputTokens) || 0 : 0;
+        if (i + t > 0) {
+          inputTokens += i;
+          outputTokens += t;
+          nonZero++;
+        }
+        // Skip text estimate — content lives in tool payload / disk apply.
+        continue;
+      }
+
       const tok = tokensFromObject(o);
       if (tok.input + tok.output <= 0) {
         continue;
@@ -154,13 +332,40 @@ function main() {
       outputTokens += tok.output;
     }
 
+    // Composer Apply diffs (accepted or not — still generated output to disk when applied).
+    let diffRows = [];
+    try {
+      diffRows = db
+        .prepare("SELECT key, value FROM cursorDiskKV WHERE key LIKE 'codeBlockDiff:%'")
+        .all();
+    } catch {
+      diffRows = [];
+    }
+
+    for (const r of diffRows) {
+      let o;
+      try {
+        o = JSON.parse(r.value.toString());
+      } catch {
+        continue;
+      }
+      const tok = estimateTokens(contentFromDiff(o));
+      if (tok > 0) {
+        fileEditTokens += tok;
+        fileEditFromDiffs++;
+      }
+    }
+
     return {
       ok: true,
       inputTokens,
       outputTokens,
-      bubbles,
+      bubbles: bubbleCount,
       nonZero,
       estimatedBubbles,
+      fileEditTokens,
+      fileEditFromTools,
+      fileEditFromDiffs,
     };
   } catch (e) {
     return { ok: false, error: "query failed: " + (e && e.message) };
